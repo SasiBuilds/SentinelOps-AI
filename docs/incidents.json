@@ -1,0 +1,14 @@
+[
+    {
+        "alert": "PodCrashLooping",
+        "root_cause": "Container crash",
+        "recovery_action": "restart deployment",
+        "recovery_status": "Deployment restarted successfully"
+    },
+    {
+        "alert": "PodCrashLooping",
+        "root_cause": "Container crash",
+        "recovery_action": "restart deployment",
+        "recovery_status": "Deployment restarted successfully"
+    }
+]

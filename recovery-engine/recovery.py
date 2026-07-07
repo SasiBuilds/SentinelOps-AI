@@ -1,4 +1,8 @@
-from kubernetes_recovery import *
+from kubernetes_recovery import (
+    restart_deployment,
+    scale_deployment,
+    rollback_deployment
+)
 
 def recover(action):
 
