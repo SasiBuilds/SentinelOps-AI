@@ -13,12 +13,21 @@ from recovery import recover
 
 app = FastAPI()
 
+
 @app.get("/")
 def home():
     return {
         "service": "SentinelOps AI",
         "status": "running"
     }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy"
+    }
+
 
 @app.post("/alert")
 def receive_alert(alert: dict):
@@ -52,3 +61,22 @@ def incidents():
 
     except:
         return []
+
+
+@app.get("/stats")
+def stats():
+
+    try:
+        with open("../docs/incidents.json", "r") as f:
+            incidents = json.load(f)
+
+        return {
+            "service": "SentinelOps AI",
+            "total_incidents": len(incidents)
+        }
+
+    except:
+        return {
+            "service": "SentinelOps AI",
+            "total_incidents": 0
+        }
