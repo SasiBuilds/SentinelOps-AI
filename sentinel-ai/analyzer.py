@@ -1,19 +1,29 @@
 def analyze(alertname):
 
     mapping = {
+
         "PodCrashLooping": {
             "cause": "Container crash",
-            "action": "restart deployment"
+            "action": "restart deployment",
+            "severity": "critical"
         },
 
         "HighCPUUsage": {
-            "cause": "High resource consumption",
-            "action": "scale deployment"
+            "cause": "Resource exhaustion",
+            "action": "scale deployment",
+            "severity": "warning"
         },
 
-        "PodDown": {
-            "cause": "Pod unavailable",
-            "action": "restart pod"
+        "ImagePullBackOff": {
+            "cause": "Container image issue",
+            "action": "rollback deployment",
+            "severity": "critical"
+        },
+
+        "OOMKilled": {
+            "cause": "Memory limit exceeded",
+            "action": "increase memory limits",
+            "severity": "critical"
         }
     }
 
@@ -21,6 +31,7 @@ def analyze(alertname):
         alertname,
         {
             "cause": "Unknown",
-            "action": "manual investigation"
+            "action": "manual investigation",
+            "severity": "unknown"
         }
     )
