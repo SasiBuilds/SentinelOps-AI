@@ -29,19 +29,7 @@ SentinelOps AI helps automate incident management by analyzing alerts, identifyi
 
 ## Architecture
 
-Monitoring Alert
-        |
-        v
-   Sentinel AI
-        |
-        +--> Analyzer
-        |
-        +--> Recovery Engine
-        |
-        +--> Incident Logger
-        |
-        v
-     Dashboard
+![alt text](architecture.drawio.png)
 
 ---
 
