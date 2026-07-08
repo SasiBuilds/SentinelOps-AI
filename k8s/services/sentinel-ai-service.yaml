@@ -1,12 +1,12 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: frontend-service
+  name: sentinel-ai-service
   namespace: sentinelops
 spec:
   selector:
-    app: frontend
+    app: sentinel-ai
   ports:
-  - port: 80
-    targetPort: 80
+  - port: 8000
+    targetPort: 8000
   type: ClusterIP

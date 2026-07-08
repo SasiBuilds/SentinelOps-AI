@@ -1,20 +1,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: backend
+  name: sentinel-ai
   namespace: sentinelops
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: backend
+      app: sentinel-ai
   template:
     metadata:
       labels:
-        app: backend
+        app: sentinel-ai
     spec:
       containers:
-      - name: backend
-        image: sentinelops/backend:latest
+      - name: sentinel-ai
+        image: sentinelops/sentinel-ai:latest
         ports:
-        - containerPort: 5000
+        - containerPort: 8000
