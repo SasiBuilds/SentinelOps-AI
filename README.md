@@ -14,6 +14,13 @@ Modern cloud-native applications can experience failures such as:
 SentinelOps AI helps automate incident management by analyzing alerts, identifying root causes, triggering recovery actions, and maintaining incident history.
 
 ---
+## Live Demo
+
+Frontend Dashboard:
+
+https://sentinelops-frontend-five.vercel.app/
+
+---
 
 ## Features
 
