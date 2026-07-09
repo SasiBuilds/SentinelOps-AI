@@ -42,15 +42,24 @@ https://sentinelops-frontend-five.vercel.app/
 
 ## Technologies Used
 
-- Python
-- FastAPI
-- Docker
-- Kubernetes
-- Node.js
-- Express.js
+### Frontend
 - HTML
 - CSS
 - JavaScript
+
+### Backend
+- Node.js
+- Express.js
+
+### AI Engine
+- Python
+- FastAPI
+
+### DevOps
+- Docker
+- Kubernetes
+
+### Monitoring
 - Prometheus
 - Grafana
 
