@@ -1,0 +1,26 @@
+[
+    {
+        "alert": "PodCrashLooping",
+        "root_cause": "Container crash",
+        "recovery_action": "restart deployment",
+        "recovery_status": "Deployment restarted successfully"
+    },
+    {
+        "alert": "PodCrashLooping",
+        "root_cause": "Container crash",
+        "recovery_action": "restart deployment",
+        "recovery_status": "Deployment restarted successfully"
+    },
+    {
+        "alert": null,
+        "root_cause": "Unknown",
+        "recovery_action": "manual investigation",
+        "recovery_status": "Manual intervention required"
+    },
+    {
+        "alert": "PodCrashLooping",
+        "root_cause": "Container crash",
+        "recovery_action": "restart deployment",
+        "recovery_status": "Restarted deployment frontend"
+    }
+]
