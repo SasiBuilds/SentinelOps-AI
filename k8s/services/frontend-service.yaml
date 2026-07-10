@@ -1,0 +1,94 @@
+---
+# =============================================================================
+# SentinelOps AI – Frontend Service
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: sentinelops-frontend
+  namespace: sentinelops
+  labels:
+    app: sentinelops-frontend
+    component: frontend
+    part-of: sentinelops-ai
+spec:
+  type: ClusterIP
+  selector:
+    app: sentinelops-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP
+---
+# ── Horizontal Pod Autoscaler – Backend ───────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: sentinelops-backend-hpa
+  namespace: sentinelops
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: sentinelops-backend
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+# ── Horizontal Pod Autoscaler – Frontend ──────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: sentinelops-frontend-hpa
+  namespace: sentinelops
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: sentinelops-frontend
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+# ── Pod Disruption Budget – Backend ──────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sentinelops-backend-pdb
+  namespace: sentinelops
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sentinelops-backend
+---
+# ── Pod Disruption Budget – Frontend ─────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sentinelops-frontend-pdb
+  namespace: sentinelops
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sentinelops-frontend

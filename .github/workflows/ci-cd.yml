@@ -1,0 +1,368 @@
+---
+# =============================================================================
+# SentinelOps AI – GitHub Actions CI/CD Pipeline
+#
+# Triggers:
+#   push to main      → full CI + build images + deploy to production
+#   push to develop   → full CI + build images (no deploy)
+#   pull_request      → lint + test only (fast feedback)
+#
+# Required repository secrets:
+#   DOCKER_USERNAME        Docker Hub username
+#   DOCKER_PASSWORD        Docker Hub token / password
+#   KUBECONFIG_BASE64      base64-encoded kubeconfig for the target cluster
+#   DATABASE_URL           PostgreSQL URL for migration job
+#   JWT_SECRET             Production JWT secret (for smoke test)
+# =============================================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      deploy_env:
+        description: "Target environment (staging | production)"
+        required: true
+        default: staging
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOCKER_REGISTRY: docker.io
+  BACKEND_IMAGE:   sentinelops/backend
+  FRONTEND_IMAGE:  sentinelops/frontend
+  AI_IMAGE:        sentinelops/sentinel-ai
+  NODE_VERSION:    "20"
+  PYTHON_VERSION:  "3.12"
+
+# ══════════════════════════════════════════════════════════════════════════════
+jobs:
+
+  # ── 1. Lint & type-check (fast, runs on every event) ──────────────────────
+  lint-backend:
+    name: Lint Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+        env:
+          DATABASE_URL: "postgresql://test:test@localhost:5432/test?schema=public"
+
+      - name: Run ESLint
+        run: npm run lint --if-present
+        continue-on-error: true
+
+  lint-python:
+    name: Lint Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: sentinel-ai/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r sentinel-ai/requirements.txt
+          pip install ruff
+
+      - name: Run Ruff linter
+        run: ruff check sentinel-ai/ recovery-engine/ --ignore E501
+        continue-on-error: true
+
+  # ── 2. Backend tests ───────────────────────────────────────────────────────
+  test-backend:
+    name: Test Backend
+    runs-on: ubuntu-latest
+    needs: [lint-backend]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sentinelops
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: sentinelops_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      NODE_ENV: test
+      DATABASE_URL: "postgresql://sentinelops:testpassword@localhost:5432/sentinelops_test?schema=public"
+      JWT_SECRET: test_jwt_secret_at_least_32_characters_long
+      JWT_REFRESH_SECRET: test_refresh_secret_at_least_32_characters_long
+      AI_SERVICE_URL: "http://localhost:8000"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Run database migrations
+        run: npm run db:migrate:prod
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
+      - name: Run tests
+        run: npm test --if-present
+
+  # ── 3. Python tests ────────────────────────────────────────────────────────
+  test-python:
+    name: Test Python (Recovery Engine)
+    runs-on: ubuntu-latest
+    needs: [lint-python]
+    defaults:
+      run:
+        working-directory: recovery-engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: sentinel-ai/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r ../sentinel-ai/requirements.txt
+
+      - name: Run recovery engine tests
+        run: python test_recovery.py
+
+      - name: Run healthcheck
+        run: python healthcheck.py
+
+  # ── 4. Build & push Docker images ─────────────────────────────────────────
+  build-images:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-python]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      backend_tag:  ${{ steps.meta-backend.outputs.tags }}
+      frontend_tag: ${{ steps.meta-frontend.outputs.tags }}
+      ai_tag:       ${{ steps.meta-ai.outputs.tags }}
+      short_sha:    ${{ steps.vars.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set short SHA
+        id: vars
+        run: echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # ── Backend ─────────────────────────────────────────────────────────
+      - name: Docker meta – backend
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Frontend ─────────────────────────────────────────────────────────
+      - name: Docker meta – frontend
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.FRONTEND_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Sentinel-AI ──────────────────────────────────────────────────────
+      - name: Docker meta – sentinel-ai
+        id: meta-ai
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.AI_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push sentinel-ai
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./sentinel-ai/Dockerfile
+          push: true
+          tags: ${{ steps.meta-ai.outputs.tags }}
+          labels: ${{ steps.meta-ai.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 5. Deploy to Kubernetes (main branch only) ─────────────────────────────
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-images]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://sentinelops.example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: v1.30.0
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Ensure namespace exists
+        run: kubectl apply -f k8s/deployments/mysql-deployment.yaml
+
+      - name: Apply ConfigMaps and Services
+        run: |
+          kubectl apply -f k8s/services/
+
+      - name: Run database migrations
+        run: |
+          kubectl run prisma-migrate \
+            --image=${{ env.BACKEND_IMAGE }}:sha-${{ needs.build-images.outputs.short_sha }} \
+            --restart=Never \
+            --rm \
+            --attach \
+            --namespace=sentinelops \
+            --env="DATABASE_URL=${{ secrets.DATABASE_URL }}" \
+            --command -- node -e "
+              import('./src/database/index.js').then(async ({connectDatabase}) => {
+                const {execSync} = await import('child_process');
+                execSync('npx prisma migrate deploy', {stdio: 'inherit'});
+                process.exit(0);
+              });
+            "
+
+      - name: Update backend image
+        run: |
+          kubectl set image deployment/sentinelops-backend \
+            backend=${{ env.BACKEND_IMAGE }}:sha-${{ needs.build-images.outputs.short_sha }} \
+            -n sentinelops
+
+      - name: Update frontend image
+        run: |
+          kubectl set image deployment/sentinelops-frontend \
+            frontend=${{ env.FRONTEND_IMAGE }}:sha-${{ needs.build-images.outputs.short_sha }} \
+            -n sentinelops
+
+      - name: Update sentinel-ai image
+        run: |
+          kubectl set image deployment/sentinel-ai \
+            sentinel-ai=${{ env.AI_IMAGE }}:sha-${{ needs.build-images.outputs.short_sha }} \
+            -n sentinelops
+
+      - name: Wait for rollouts
+        run: |
+          kubectl rollout status deployment/sentinelops-backend  -n sentinelops --timeout=120s
+          kubectl rollout status deployment/sentinelops-frontend -n sentinelops --timeout=120s
+          kubectl rollout status deployment/sentinel-ai          -n sentinelops --timeout=120s
+
+      - name: Smoke test
+        run: |
+          BACKEND_URL="https://api.sentinelops.example.com"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BACKEND_URL/api/v1/health")
+          if [ "$STATUS" != "200" ]; then
+            echo "Smoke test FAILED – health endpoint returned HTTP $STATUS"
+            exit 1
+          fi
+          echo "Smoke test PASSED – HTTP $STATUS"
+
+      - name: Apply ingress
+        run: kubectl apply -f k8s/ingress/
+
+  # ── 6. Notify on failure ────────────────────────────────────────────────────
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [lint-backend, lint-python, test-backend, test-python, build-images, deploy]
+    if: failure() && github.ref == 'refs/heads/main'
+    steps:
+      - name: Post failure notification
+        run: |
+          echo "Pipeline FAILED for commit ${{ github.sha }} on branch ${{ github.ref_name }}"
+          echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          # In production: call a Slack / PagerDuty webhook here

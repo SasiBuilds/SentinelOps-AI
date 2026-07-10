@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SentinelOps AI – Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ════════════════════════════════════════════════════════════
+       Navigation
+  ═══════════════════════════════════════════════════════════════ -->
+  <nav class="navbar" role="navigation" aria-label="Main navigation">
+    <div class="navbar__brand">
+      <span class="navbar__icon" aria-hidden="true">🛡️</span>
+      <span class="navbar__title">SentinelOps <strong>AI</strong></span>
+    </div>
+    <div class="navbar__actions">
+      <span class="navbar__env" id="envBadge">development</span>
+      <button class="btn btn--sm btn--outline" id="refreshBtn" aria-label="Refresh dashboard">
+        <span aria-hidden="true">↻</span> Refresh
+      </button>
+      <div class="user-menu" id="userMenu" hidden>
+        <span class="user-menu__name" id="userNameDisplay"></span>
+        <span class="user-menu__role badge" id="userRoleDisplay"></span>
+        <button class="btn btn--sm btn--ghost" id="logoutBtn">Sign out</button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ════════════════════════════════════════════════════════════
+       Auth modal (login)
+  ═══════════════════════════════════════════════════════════════ -->
+  <div class="modal-backdrop" id="authModal" role="dialog" aria-modal="true" aria-labelledby="authModalTitle">
+    <div class="modal">
+      <h2 class="modal__title" id="authModalTitle">
+        <span aria-hidden="true">🛡️</span> Sign in to SentinelOps AI
+      </h2>
+      <form class="form" id="loginForm" novalidate>
+        <div class="form__group">
+          <label class="form__label" for="emailInput">Email address</label>
+          <input class="form__input" id="emailInput" type="email" name="email"
+            autocomplete="email" placeholder="you@example.com" required />
+          <span class="form__error" id="emailError" role="alert"></span>
+        </div>
+        <div class="form__group">
+          <label class="form__label" for="passwordInput">Password</label>
+          <input class="form__input" id="passwordInput" type="password" name="password"
+            autocomplete="current-password" placeholder="••••••••" required />
+          <span class="form__error" id="passwordError" role="alert"></span>
+        </div>
+        <span class="form__error form__error--global" id="authError" role="alert"></span>
+        <button class="btn btn--primary btn--full" type="submit" id="loginBtn">Sign in</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════════════════════
+       Main content
+  ═══════════════════════════════════════════════════════════════ -->
+  <main class="main" id="mainContent" hidden>
+
+    <!-- Toast notification area -->
+    <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- ── Page header ── -->
+    <header class="page-header">
+      <div>
+        <h1 class="page-header__title">Operations Dashboard</h1>
+        <p class="page-header__subtitle">Real-time autonomous disaster detection &amp; recovery</p>
+      </div>
+      <div class="page-header__meta">
+        <span class="status-dot" id="systemStatusDot" title="System status"></span>
+        <span id="systemStatusLabel">Checking…</span>
+        <span class="divider" aria-hidden="true">·</span>
+        <span id="lastUpdated">–</span>
+      </div>
+    </header>
+
+    <!-- ── Stats cards ── -->
+    <section class="stats-grid" aria-label="Summary statistics">
+      <div class="stat-card stat-card--blue">
+        <div class="stat-card__icon" aria-hidden="true">📋</div>
+        <div class="stat-card__body">
+          <p class="stat-card__label">Total Incidents</p>
+          <p class="stat-card__value" id="statTotalIncidents">–</p>
+        </div>
+      </div>
+      <div class="stat-card stat-card--red">
+        <div class="stat-card__icon" aria-hidden="true">🔴</div>
+        <div class="stat-card__body">
+          <p class="stat-card__label">Open Incidents</p>
+          <p class="stat-card__value" id="statOpenIncidents">–</p>
+        </div>
+      </div>
+      <div class="stat-card stat-card--orange">
+        <div class="stat-card__icon" aria-hidden="true">🔔</div>
+        <div class="stat-card__body">
+          <p class="stat-card__label">Firing Alerts</p>
+          <p class="stat-card__value" id="statFiringAlerts">–</p>
+        </div>
+      </div>
+      <div class="stat-card stat-card--green">
+        <div class="stat-card__icon" aria-hidden="true">⚡</div>
+        <div class="stat-card__body">
+          <p class="stat-card__label">Recovery Success</p>
+          <p class="stat-card__value" id="statRecoveryRate">–</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Incidents table ── -->
+    <section class="panel" aria-labelledby="incidentsHeading">
+      <div class="panel__header">
+        <h2 class="panel__title" id="incidentsHeading">Recent Incidents</h2>
+        <div class="panel__controls">
+          <select class="form__select" id="incidentStatusFilter" aria-label="Filter by status">
+            <option value="">All statuses</option>
+            <option value="OPEN">Open</option>
+            <option value="IN_PROGRESS">In Progress</option>
+            <option value="RESOLVED">Resolved</option>
+            <option value="CLOSED">Closed</option>
+          </select>
+          <select class="form__select" id="incidentSeverityFilter" aria-label="Filter by severity">
+            <option value="">All severities</option>
+            <option value="CRITICAL">Critical</option>
+            <option value="HIGH">High</option>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+            <option value="INFO">Info</option>
+          </select>
+          <button class="btn btn--sm btn--primary" id="newIncidentBtn"
+            aria-label="Create new incident">+ New</button>
+        </div>
+      </div>
+      <div class="table-wrapper" role="region" aria-label="Incidents table" tabindex="0">
+        <table class="table" id="incidentsTable">
+          <thead>
+            <tr>
+              <th scope="col">Title</th>
+              <th scope="col">Severity</th>
+              <th scope="col">Status</th>
+              <th scope="col">Service</th>
+              <th scope="col">Detected</th>
+              <th scope="col">Recoveries</th>
+            </tr>
+          </thead>
+          <tbody id="incidentsTbody">
+            <tr><td colspan="6" class="table__empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination" id="incidentPagination" aria-label="Incidents pagination"></div>
+    </section>
+
+    <!-- ── Alerts & Recovery panels (side by side) ── -->
+    <div class="two-col-grid">
+
+      <!-- Alerts -->
+      <section class="panel" aria-labelledby="alertsHeading">
+        <div class="panel__header">
+          <h2 class="panel__title" id="alertsHeading">Recent Alerts</h2>
+          <button class="btn btn--sm btn--outline" id="testAlertBtn"
+            aria-label="Send a test alert to the AI engine">Send Test Alert</button>
+        </div>
+        <div class="table-wrapper" role="region" aria-label="Alerts table" tabindex="0">
+          <table class="table" id="alertsTable">
+            <thead>
+              <tr>
+                <th scope="col">Alert name</th>
+                <th scope="col">Severity</th>
+                <th scope="col">Service</th>
+                <th scope="col">Status</th>
+                <th scope="col">Time</th>
+              </tr>
+            </thead>
+            <tbody id="alertsTbody">
+              <tr><td colspan="5" class="table__empty">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Recovery -->
+      <section class="panel" aria-labelledby="recoveryHeading">
+        <div class="panel__header">
+          <h2 class="panel__title" id="recoveryHeading">Recovery Actions</h2>
+        </div>
+        <div class="table-wrapper" role="region" aria-label="Recovery table" tabindex="0">
+          <table class="table" id="recoveryTable">
+            <thead>
+              <tr>
+                <th scope="col">Action</th>
+                <th scope="col">Service</th>
+                <th scope="col">Status</th>
+                <th scope="col">Automated</th>
+                <th scope="col">Started</th>
+              </tr>
+            </thead>
+            <tbody id="recoveryTbody">
+              <tr><td colspan="5" class="table__empty">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ── AI Engine panel ── -->
+    <section class="panel" aria-labelledby="aiHeading">
+      <div class="panel__header">
+        <h2 class="panel__title" id="aiHeading">AI Engine – Sentinel Analysis</h2>
+        <span class="badge" id="aiStatusBadge">Checking…</span>
+      </div>
+      <div class="ai-stats" id="aiStats">
+        <p class="ai-stats__loading">Loading AI statistics…</p>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ════════════════════════════════════════════════════════════
+       Create Incident modal
+  ═══════════════════════════════════════════════════════════════ -->
+  <div class="modal-backdrop" id="createIncidentModal" hidden
+    role="dialog" aria-modal="true" aria-labelledby="createIncidentTitle">
+    <div class="modal modal--wide">
+      <div class="modal__head">
+        <h2 class="modal__title" id="createIncidentTitle">Create Incident</h2>
+        <button class="modal__close" id="closeCreateIncidentBtn" aria-label="Close">&times;</button>
+      </div>
+      <form class="form" id="createIncidentForm" novalidate>
+        <div class="form__row">
+          <div class="form__group">
+            <label class="form__label" for="incTitle">Title *</label>
+            <input class="form__input" id="incTitle" name="title" required maxlength="255" />
+            <span class="form__error" id="incTitleError" role="alert"></span>
+          </div>
+          <div class="form__group">
+            <label class="form__label" for="incSeverity">Severity</label>
+            <select class="form__select" id="incSeverity" name="severity">
+              <option value="CRITICAL">Critical</option>
+              <option value="HIGH">High</option>
+              <option value="MEDIUM" selected>Medium</option>
+              <option value="LOW">Low</option>
+              <option value="INFO">Info</option>
+            </select>
+          </div>
+        </div>
+        <div class="form__row">
+          <div class="form__group">
+            <label class="form__label" for="incService">Service</label>
+            <input class="form__input" id="incService" name="service" placeholder="e.g. frontend" />
+          </div>
+          <div class="form__group">
+            <label class="form__label" for="incSource">Source</label>
+            <input class="form__input" id="incSource" name="source" placeholder="e.g. Prometheus" />
+          </div>
+        </div>
+        <div class="form__group">
+          <label class="form__label" for="incDescription">Description</label>
+          <textarea class="form__input form__textarea" id="incDescription"
+            name="description" rows="3"></textarea>
+        </div>
+        <div class="form__group">
+          <label class="form__label" for="incRootCause">Root Cause</label>
+          <textarea class="form__input form__textarea" id="incRootCause"
+            name="rootCause" rows="2"></textarea>
+        </div>
+        <span class="form__error form__error--global" id="createIncidentError" role="alert"></span>
+        <div class="modal__actions">
+          <button type="button" class="btn btn--outline" id="cancelCreateIncidentBtn">Cancel</button>
+          <button type="submit" class="btn btn--primary" id="submitCreateIncidentBtn">Create Incident</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
