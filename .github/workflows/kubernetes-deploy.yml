@@ -1,0 +1,608 @@
+# =============================================================================
+# kubernetes-deploy.yml – Kubernetes Manifest Deployment
+#
+# Dedicated workflow for applying all k8s manifests from the k8s/ directory
+# to the sentinelops namespace.  This workflow is intentionally separate from
+# cd.yml so that infrastructure-only changes (tweaking resource limits, adding
+# a ConfigMap, adjusting HPA thresholds) can be deployed without triggering
+# a full image rebuild and application deployment cycle.
+#
+# Manifest apply order (dependency-safe):
+#   1. namespace.yaml           – must exist before anything else
+#   2. persistent-volumes/      – PVC must exist before postgres starts
+#   3. secrets/                 – pods reference secrets via envFrom
+#   4. services/                – DNS entries registered before pods boot
+#   5. deployments/             – workloads reference all of the above
+#
+# Rollout monitoring:
+#   Each deployment is watched with `kubectl rollout status --timeout=5m`.
+#   If any deployment does not reach its desired state within 5 minutes the
+#   step fails, the job fails, and the failure-report job captures a full
+#   diagnostic snapshot (pod events, logs, describe output).
+#
+# Triggers:
+#   • push to main affecting k8s/**         – auto-deploy on manifest changes
+#   • workflow_dispatch                     – manual deploy with options
+#   • workflow_call (reusable)              – callable from cd.yml
+#
+# Required secret:
+#   KUBECONFIG_B64  – base64-encoded kubeconfig for the target cluster.
+#                     Generate with: base64 -w 0 ~/.kube/config
+#                     Store under: Settings → Secrets → Actions.
+#
+# Optional repository variables:
+#   K8S_CONTEXT     – kubectl context name to use (default: current-context)
+# =============================================================================
+
+name: Kubernetes Deploy
+
+on:
+  push:
+    branches:
+      - main
+    # Only trigger when k8s manifests or this workflow file itself change.
+    # Application code changes are handled by docker-build.yml + cd.yml.
+    paths:
+      - "k8s/**"
+      - ".github/workflows/kubernetes-deploy.yml"
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: false
+        default: "production"
+        type: choice
+        options:
+          - production
+          - staging
+      dry_run:
+        description: "Dry-run: validate manifests without applying them"
+        required: false
+        default: false
+        type: boolean
+      skip_rollout_wait:
+        description: "Skip rollout status checks (useful for infra-only changes)"
+        required: false
+        default: false
+        type: boolean
+      manifest_subset:
+        description: "Deploy only a specific subfolder (leave empty for all)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - namespace
+          - secrets
+          - persistent-volumes
+          - services
+          - deployments
+
+  # Allow cd.yml to call this workflow as a reusable job.
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: false
+        default: "production"
+      dry_run:
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      KUBECONFIG_B64:
+        required: true
+
+concurrency:
+  # Only one k8s deployment at a time per environment to avoid race conditions.
+  group: k8s-deploy-${{ inputs.environment || 'production' }}
+  cancel-in-progress: false   # never cancel an in-flight k8s deploy
+
+permissions:
+  contents: read
+
+env:
+  K8S_NAMESPACE: sentinelops
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # JOB 1 – Validate
+  # Runs a server-side dry-run against every manifest before anything is
+  # applied.  Catches schema errors, admission webhook rejections, and
+  # namespace-scoping mistakes early.
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate Manifests
+    runs-on: ubuntu-latest
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1 – Checkout
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2 – Install kubectl
+      # Pin to a specific version.  kubectl must be within +/-1 minor version
+      # of the cluster's Kubernetes version to guarantee API compatibility.
+      # -----------------------------------------------------------------------
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      # -----------------------------------------------------------------------
+      # Step 3 – Configure cluster access
+      # The kubeconfig is base64-encoded to survive the GitHub secrets
+      # sanitisation process (which strips newlines).
+      # Writing to $HOME/.kube/config with mode 600 mirrors what kubectl
+      # expects for a user-level kubeconfig.
+      # -----------------------------------------------------------------------
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 --decode > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+          # Switch to the specified context if provided.
+          if [[ -n "${{ vars.K8S_CONTEXT }}" ]]; then
+            kubectl config use-context "${{ vars.K8S_CONTEXT }}"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step 4 – Verify cluster is reachable
+      # Fails fast before any expensive operations if the API server is down
+      # or the kubeconfig is misconfigured.
+      # -----------------------------------------------------------------------
+      - name: Verify cluster connectivity
+        run: |
+          echo "Cluster info:"
+          kubectl cluster-info
+          echo ""
+          echo "Node status:"
+          kubectl get nodes -o wide
+
+      # -----------------------------------------------------------------------
+      # Step 5 – Print current namespace state (pre-deploy snapshot)
+      # Recorded in the log so it can be diff'd against the post-deploy state.
+      # -----------------------------------------------------------------------
+      - name: Pre-deploy namespace snapshot
+        run: |
+          echo "=== Current deployments ==="
+          kubectl get deployments -n ${{ env.K8S_NAMESPACE }} \
+            -o wide 2>/dev/null || echo "(namespace may not exist yet)"
+
+          echo ""
+          echo "=== Current pods ==="
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} \
+            -o wide 2>/dev/null || echo "(no pods)"
+
+          echo ""
+          echo "=== Current services ==="
+          kubectl get services -n ${{ env.K8S_NAMESPACE }} \
+            2>/dev/null || echo "(no services)"
+
+      # -----------------------------------------------------------------------
+      # Step 6 – Server-side dry-run
+      # Applies every manifest with --dry-run=server so the API server fully
+      # validates them (admission webhooks, RBAC, CRD schemas) without writing
+      # to etcd.  This is more thorough than --dry-run=client.
+      # Skipped if a manifest_subset is targeted (subset validation still runs
+      # in the deploy job itself before applying).
+      # -----------------------------------------------------------------------
+      - name: Server-side dry-run (full manifest set)
+        if: inputs.manifest_subset == '' || inputs.manifest_subset == null
+        run: |
+          echo "Running server-side dry-run across all manifests..."
+          kubectl apply \
+            --dry-run=server \
+            -f k8s/namespace.yaml
+
+          kubectl apply \
+            --dry-run=server \
+            -f k8s/persistent-volumes/
+
+          kubectl apply \
+            --dry-run=server \
+            -f k8s/secrets/
+
+          kubectl apply \
+            --dry-run=server \
+            -f k8s/services/
+
+          kubectl apply \
+            --dry-run=server \
+            -f k8s/deployments/
+
+          echo "All manifests passed server-side validation."
+
+      - name: Server-side dry-run (subset – ${{ inputs.manifest_subset }})
+        if: inputs.manifest_subset != '' && inputs.manifest_subset != null
+        run: |
+          TARGET="k8s/${{ inputs.manifest_subset }}"
+          echo "Running server-side dry-run for subset: $TARGET"
+          kubectl apply --dry-run=server -f "$TARGET"
+          echo "Subset passed server-side validation."
+
+  # ---------------------------------------------------------------------------
+  # JOB 2 – Deploy
+  # Applies manifests in dependency order using server-side apply (SSA).
+  # SSA is preferred over client-side apply because it:
+  #   • Handles field-manager conflicts correctly
+  #   • Preserves fields set by other controllers (e.g. HPA, admission webhooks)
+  #   • Produces accurate `last-applied` tracking in the server
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy Manifests (${{ inputs.environment || 'production' }})
+    runs-on: ubuntu-latest
+    needs: validate
+    environment:
+      name: ${{ inputs.environment || 'production' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 --decode > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          if [[ -n "${{ vars.K8S_CONTEXT }}" ]]; then
+            kubectl config use-context "${{ vars.K8S_CONTEXT }}"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step 4 – Determine dry-run flag
+      # Set once here; reused in every apply step below to keep the logic DRY.
+      # -----------------------------------------------------------------------
+      - name: Set dry-run flag
+        id: flags
+        run: |
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            echo "dry_run_flag=--dry-run=server" >> "$GITHUB_OUTPUT"
+            echo "Mode: DRY RUN (no changes will be persisted)"
+          else
+            echo "dry_run_flag=" >> "$GITHUB_OUTPUT"
+            echo "Mode: LIVE APPLY"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step 5 – Apply namespace
+      # Must be first: all other resources are scoped to this namespace.
+      # `--server-side` uses SSA; `--force-conflicts` lets this workflow take
+      # ownership of fields it manages without erroring on conflict.
+      # -----------------------------------------------------------------------
+      - name: Apply namespace
+        run: |
+          kubectl apply \
+            --server-side \
+            --force-conflicts \
+            ${{ steps.flags.outputs.dry_run_flag }} \
+            -f k8s/namespace.yaml
+          echo "Namespace applied."
+
+      # -----------------------------------------------------------------------
+      # Step 6 – Apply persistent volumes
+      # PVCs must be bound before postgres pods can start.
+      # -----------------------------------------------------------------------
+      - name: Apply persistent volumes
+        if: inputs.manifest_subset == '' || inputs.manifest_subset == null || inputs.manifest_subset == 'persistent-volumes'
+        run: |
+          kubectl apply \
+            --server-side \
+            --force-conflicts \
+            ${{ steps.flags.outputs.dry_run_flag }} \
+            -f k8s/persistent-volumes/
+          echo "Persistent volumes applied."
+
+      # -----------------------------------------------------------------------
+      # Step 7 – Apply secrets
+      # Applied before deployments because pods reference secrets via envFrom.
+      # NOTE: postgres-secret.yaml uses stringData (plaintext).  For production
+      # harden this by migrating to an external secrets manager such as
+      # External Secrets Operator, Sealed Secrets, or AWS Secrets Manager.
+      # -----------------------------------------------------------------------
+      - name: Apply secrets
+        if: inputs.manifest_subset == '' || inputs.manifest_subset == null || inputs.manifest_subset == 'secrets'
+        run: |
+          kubectl apply \
+            --server-side \
+            --force-conflicts \
+            ${{ steps.flags.outputs.dry_run_flag }} \
+            -f k8s/secrets/
+          echo "Secrets applied."
+
+      # -----------------------------------------------------------------------
+      # Step 8 – Apply services
+      # DNS entries for ClusterIP services are registered in kube-dns before
+      # pods start, so inter-pod service discovery works from first boot.
+      # Services:
+      #   backend-service   → port 5000
+      #   frontend-service  → port 80
+      #   sentinel-ai-service → port 8000
+      #   postgres-service  → port 5432
+      # -----------------------------------------------------------------------
+      - name: Apply services
+        if: inputs.manifest_subset == '' || inputs.manifest_subset == null || inputs.manifest_subset == 'services'
+        run: |
+          kubectl apply \
+            --server-side \
+            --force-conflicts \
+            ${{ steps.flags.outputs.dry_run_flag }} \
+            -f k8s/services/
+          echo "Services applied."
+
+          # Print the service list immediately after for quick verification.
+          kubectl get services -n ${{ env.K8S_NAMESPACE }}
+
+      # -----------------------------------------------------------------------
+      # Step 9 – Apply deployments
+      # Workloads are applied last so they can immediately resolve service DNS
+      # and mount the already-existing secrets/PVCs.
+      # -----------------------------------------------------------------------
+      - name: Apply deployments
+        if: inputs.manifest_subset == '' || inputs.manifest_subset == null || inputs.manifest_subset == 'deployments'
+        run: |
+          kubectl apply \
+            --server-side \
+            --force-conflicts \
+            ${{ steps.flags.outputs.dry_run_flag }} \
+            -f k8s/deployments/
+          echo "Deployments applied."
+
+      # -----------------------------------------------------------------------
+      # Step 10 – Wait for rollouts
+      #
+      # `kubectl rollout status` polls the deployment controller until:
+      #   a) The desired number of pods are Ready  → exit 0 (success)
+      #   b) A pod enters a terminal failure state  → exit 1 (failure)
+      #   c) The timeout elapses                    → exit 1 (failure)
+      #
+      # Order: postgres first (other services may depend on it), then the
+      # application tier in parallel-friendly order.
+      #
+      # Skipped when:
+      #   • dry_run is true (nothing was actually applied)
+      #   • skip_rollout_wait is true (infra-only changes like ConfigMaps)
+      #   • manifest_subset is not 'deployments' (no deployment was touched)
+      # -----------------------------------------------------------------------
+      - name: Wait for rollout – postgres
+        if: >
+          inputs.dry_run != true &&
+          inputs.skip_rollout_wait != true &&
+          (inputs.manifest_subset == '' || inputs.manifest_subset == null || inputs.manifest_subset == 'deployments')
+        run: |
+          echo "Waiting for postgres rollout..."
+          kubectl rollout status deployment/postgres \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=5m
+          echo "postgres is ready."
+
+      - name: Wait for rollout – backend
+        if: >
+          inputs.dry_run != true &&
+          inputs.skip_rollout_wait != true &&
+          (inputs.manifest_subset == '' || inputs.manifest_subset == null || inputs.manifest_subset == 'deployments')
+        run: |
+          echo "Waiting for backend rollout..."
+          kubectl rollout status deployment/backend \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=5m
+          echo "backend is ready."
+
+      - name: Wait for rollout – sentinel-ai
+        if: >
+          inputs.dry_run != true &&
+          inputs.skip_rollout_wait != true &&
+          (inputs.manifest_subset == '' || inputs.manifest_subset == null || inputs.manifest_subset == 'deployments')
+        run: |
+          echo "Waiting for sentinel-ai rollout..."
+          kubectl rollout status deployment/sentinel-ai \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=5m
+          echo "sentinel-ai is ready."
+
+      - name: Wait for rollout – frontend
+        if: >
+          inputs.dry_run != true &&
+          inputs.skip_rollout_wait != true &&
+          (inputs.manifest_subset == '' || inputs.manifest_subset == null || inputs.manifest_subset == 'deployments')
+        run: |
+          echo "Waiting for frontend rollout..."
+          kubectl rollout status deployment/frontend \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=5m
+          echo "frontend is ready."
+
+      # -----------------------------------------------------------------------
+      # Step 15 – Post-deploy namespace snapshot
+      # Records the final pod/deployment state after the rollout completes.
+      # Comparing this to the pre-deploy snapshot (in the validate job) gives
+      # a clear diff of what changed.
+      # -----------------------------------------------------------------------
+      - name: Post-deploy namespace snapshot
+        if: always() && inputs.dry_run != true
+        run: |
+          echo "=== Deployments ==="
+          kubectl get deployments -n ${{ env.K8S_NAMESPACE }} -o wide
+
+          echo ""
+          echo "=== Pods ==="
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -o wide \
+            --sort-by='.metadata.creationTimestamp'
+
+          echo ""
+          echo "=== Services ==="
+          kubectl get services -n ${{ env.K8S_NAMESPACE }}
+
+          echo ""
+          echo "=== PersistentVolumeClaims ==="
+          kubectl get pvc -n ${{ env.K8S_NAMESPACE }}
+
+  # ---------------------------------------------------------------------------
+  # JOB 3 – Failure Diagnostics
+  # Runs only when the deploy job fails.  Captures enough context to diagnose
+  # the failure without requiring direct cluster access.
+  # ---------------------------------------------------------------------------
+  failure-report:
+    name: Failure Diagnostics
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: failure()
+
+    steps:
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 --decode > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      # -----------------------------------------------------------------------
+      # Capture diagnostic information for every deployment in the namespace.
+      # This includes:
+      #   • kubectl describe deployment  – spec, strategy, rollout conditions
+      #   • kubectl describe pods        – events, image pull errors, OOM kills
+      #   • kubectl logs                 – last 50 lines from each container
+      #
+      # Output is tee'd to a file so it can be uploaded as an artefact for
+      # engineers who don't have direct cluster access.
+      # -----------------------------------------------------------------------
+      - name: Capture deployment diagnostics
+        run: |
+          NS="${{ env.K8S_NAMESPACE }}"
+          OUT="k8s-failure-diagnostics.txt"
+
+          {
+            echo "=== FAILURE DIAGNOSTICS ==="
+            echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Commit:    ${{ github.sha }}"
+            echo "Run:       ${{ github.run_id }}"
+            echo ""
+
+            for DEPLOY in postgres backend sentinel-ai frontend; do
+              echo "============================================================"
+              echo "DEPLOYMENT: $DEPLOY"
+              echo "============================================================"
+
+              echo "--- kubectl describe deployment/${DEPLOY} ---"
+              kubectl describe deployment/${DEPLOY} -n ${NS} 2>&1 || echo "(not found)"
+              echo ""
+
+              echo "--- kubectl get pods (selector: app=${DEPLOY}) ---"
+              kubectl get pods -n ${NS} -l app=${DEPLOY} -o wide 2>&1 || echo "(no pods)"
+              echo ""
+
+              echo "--- kubectl describe pods (selector: app=${DEPLOY}) ---"
+              kubectl describe pods -n ${NS} -l app=${DEPLOY} 2>&1 || echo "(no pods)"
+              echo ""
+
+              echo "--- kubectl logs (last 50 lines, all containers) ---"
+              # Get all pod names for this deployment
+              PODS=$(kubectl get pods -n ${NS} -l app=${DEPLOY} \
+                -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+              for POD in $PODS; do
+                echo "  Pod: $POD"
+                kubectl logs ${POD} -n ${NS} --all-containers --tail=50 2>&1 \
+                  || echo "  (no logs available)"
+                echo ""
+              done
+
+              echo ""
+            done
+
+            echo "=== EVENTS (all, sorted by time) ==="
+            kubectl get events -n ${NS} \
+              --sort-by='.lastTimestamp' 2>&1 || echo "(no events)"
+
+          } | tee "$OUT"
+
+      # -----------------------------------------------------------------------
+      # Upload diagnostics as a workflow artefact so team members can
+      # download and review without cluster access.  Retained for 7 days.
+      # -----------------------------------------------------------------------
+      - name: Upload diagnostics artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8s-failure-diagnostics-${{ github.run_id }}
+          path: k8s-failure-diagnostics.txt
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # Write a failure summary to the GitHub Actions job summary page.
+      # -----------------------------------------------------------------------
+      - name: Write failure summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ❌ Kubernetes Deployment Failed
+
+          | Field          | Value                                    |
+          |----------------|------------------------------------------|
+          | **Namespace**  | ${{ env.K8S_NAMESPACE }}                 |
+          | **Commit SHA** | \`${{ github.sha }}\`                    |
+          | **Run ID**     | ${{ github.run_id }}                     |
+          | **Triggered by** | ${{ github.actor }}                    |
+          | **Timestamp**  | $(date -u +%Y-%m-%dT%H:%M:%SZ)          |
+
+          ### Next Steps
+          1. Download the **k8s-failure-diagnostics** artefact from this run.
+          2. Check pod events for \`ImagePullBackOff\`, \`CrashLoopBackOff\`, or \`OOMKilled\`.
+          3. Verify the image tag exists in GHCR with the correct SHA.
+          4. Check that \`postgres-secret\` is present and correctly formatted.
+          5. Re-run this workflow with **dry_run: true** to validate manifests without risk.
+          EOF
+
+  # ---------------------------------------------------------------------------
+  # JOB 4 – Success Report
+  # Runs only when deploy succeeds.  Writes a clean summary and records the
+  # deployed commit SHA for audit purposes.
+  # ---------------------------------------------------------------------------
+  success-report:
+    name: Deployment Success Report
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+
+    steps:
+      - name: Write success summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ✅ Kubernetes Deployment Succeeded
+
+          | Field            | Value                                        |
+          |------------------|----------------------------------------------|
+          | **Environment**  | ${{ inputs.environment || 'production' }}    |
+          | **Namespace**    | ${{ env.K8S_NAMESPACE }}                     |
+          | **Commit SHA**   | \`${{ github.sha }}\`                        |
+          | **Run ID**       | ${{ github.run_id }}                         |
+          | **Triggered by** | ${{ github.actor }}                          |
+          | **Timestamp**    | $(date -u +%Y-%m-%dT%H:%M:%SZ)              |
+          | **Dry Run**      | ${{ inputs.dry_run || 'false' }}             |
+
+          ### Deployed Resources
+          | Resource                     | Manifest                                   |
+          |------------------------------|--------------------------------------------|
+          | Namespace \`sentinelops\`    | k8s/namespace.yaml                         |
+          | PVC \`postgres-pvc\` (2Gi)   | k8s/persistent-volumes/postgres-pvc.yaml   |
+          | Secret \`postgres-secret\`   | k8s/secrets/postgres-secret.yaml           |
+          | Deployment \`postgres\`      | k8s/deployments/postgres-deployment.yaml   |
+          | Deployment \`backend\`       | k8s/deployments/backend-deployment.yaml    |
+          | Deployment \`sentinel-ai\`   | k8s/deployments/sentinel-ai-deployment.yaml|
+          | Deployment \`frontend\`      | k8s/deployments/frontend-deployment.yaml   |
+          | Service \`backend-service\`  | k8s/services/backend-service.yaml          |
+          | Service \`frontend-service\` | k8s/services/frontend-service.yaml         |
+          | Service \`sentinel-ai-service\` | k8s/services/sentinel-ai-service.yaml   |
+          | Service \`postgres-service\` | k8s/services/postgres-service.yaml         |
+          EOF

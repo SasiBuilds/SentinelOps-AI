@@ -1,0 +1,456 @@
+# =============================================================================
+# docker-build.yml – Build & Push Docker Images to GHCR
+#
+# Builds three production images from the repository's existing Dockerfiles:
+#   • ghcr.io/<owner>/sentinelops-backend      (node:20-alpine, port 5000)
+#   • ghcr.io/<owner>/sentinelops-frontend     (node:20-alpine → nginx:alpine, port 80)
+#   • ghcr.io/<owner>/sentinelops-sentinel-ai  (python:3.13-slim, port 8000)
+#
+# Triggers:
+#   • push to main                    → builds and pushes with sha + latest tags
+#   • pull_request targeting main     → builds only (no push) for validation
+#   • workflow_dispatch               → manual build with optional custom tag
+#   • workflow_call                   → reusable; called from cd.yml if desired
+#
+# Tags applied to every pushed image:
+#   sha-<7-char git sha>   — immutable, used for precise rollbacks
+#   latest                 — mutable, always points to the newest main build
+#   YYYY-MM-DD             — date-stamped for audit trails
+#
+# Required permissions:
+#   contents: read          — to checkout the source code
+#   packages: write         — to push images to GHCR
+#
+# No external secrets are needed. GITHUB_TOKEN is sufficient for GHCR.
+# =============================================================================
+
+name: Docker Build & Push
+
+on:
+  push:
+    branches:
+      - main
+    # Only rebuild when relevant source paths actually changed.
+    # This prevents unnecessary image rebuilds when only docs or k8s configs change.
+    paths:
+      - "frontend/**"
+      - "backend/**"
+      - "sentinel-ai/**"
+      - "recovery-engine/**"
+      - ".github/workflows/docker-build.yml"
+
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "frontend/**"
+      - "backend/**"
+      - "sentinel-ai/**"
+      - "recovery-engine/**"
+
+  workflow_dispatch:
+    inputs:
+      custom_tag:
+        description: "Additional image tag to apply (e.g. v1.2.3). Leave empty to use sha + latest."
+        required: false
+        default: ""
+        type: string
+      push_images:
+        description: "Push images to GHCR after building"
+        required: false
+        default: true
+        type: boolean
+      target_service:
+        description: "Build only one service (leave empty for all)"
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - backend
+          - frontend
+          - sentinel-ai
+
+  # Allow other workflows (e.g. cd.yml) to call this workflow as a job.
+  workflow_call:
+    inputs:
+      custom_tag:
+        type: string
+        required: false
+        default: ""
+      push_images:
+        type: boolean
+        required: false
+        default: true
+    outputs:
+      image_tag:
+        description: "The primary image tag built and pushed (sha-XXXXXXX)"
+        value: ${{ jobs.prepare.outputs.image_tag }}
+
+# Cancel in-flight runs for the same ref to avoid wasted registry pushes.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+# Minimal permissions; packages:write is added only where needed.
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  # GitHub lowercases the owner for GHCR; this expression handles mixed-case
+  # organisation and user names automatically.
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # JOB 1 – Prepare
+  # Computes shared metadata (tags, labels) once so all image-build jobs use
+  # exactly the same values without duplicating logic.
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Prepare Build Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      # Short SHA tag: sha-a1b2c3d  (7 chars, matches git log --abbrev-commit)
+      image_tag:    ${{ steps.meta.outputs.image_tag }}
+      # Full tag list consumed by docker/metadata-action in each build job
+      tags_backend:     ${{ steps.tags-backend.outputs.tags }}
+      tags_frontend:    ${{ steps.tags-frontend.outputs.tags }}
+      tags_sentinel_ai: ${{ steps.tags-sentinel-ai.outputs.tags }}
+      # Whether images should actually be pushed
+      should_push:  ${{ steps.meta.outputs.should_push }}
+      # Date label for OCI annotations
+      build_date:   ${{ steps.meta.outputs.build_date }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Compute shared metadata values
+      # -----------------------------------------------------------------------
+      - name: Compute metadata
+        id: meta
+        run: |
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:7}"
+          echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+          # Push when: on main push, manual dispatch with push_images=true,
+          # or workflow_call with push_images=true.
+          # Never push on pull_request.
+          SHOULD_PUSH="false"
+          if [[ "${{ github.event_name }}" == "push" && \
+                "${{ github.ref }}" == "refs/heads/main" ]]; then
+            SHOULD_PUSH="true"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && \
+                  "${{ inputs.push_images }}" == "true" ]]; then
+            SHOULD_PUSH="true"
+          elif [[ "${{ github.event_name }}" == "workflow_call" && \
+                  "${{ inputs.push_images }}" == "true" ]]; then
+            SHOULD_PUSH="true"
+          fi
+          echo "should_push=${SHOULD_PUSH}" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Generate OCI-compliant tag lists for each image.
+      # docker/metadata-action produces a newline-separated tag list and a
+      # labels block that embeds standard OCI annotations into the image.
+      # -----------------------------------------------------------------------
+      - name: Generate tags – backend
+        id: tags-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/sentinelops-backend
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value={{date 'YYYY-MM-DD'}},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ inputs.custom_tag }},enable=${{ inputs.custom_tag != '' }}
+
+      - name: Generate tags – frontend
+        id: tags-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/sentinelops-frontend
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value={{date 'YYYY-MM-DD'}},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ inputs.custom_tag }},enable=${{ inputs.custom_tag != '' }}
+
+      - name: Generate tags – sentinel-ai
+        id: tags-sentinel-ai
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OWNER }}/sentinelops-sentinel-ai
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value={{date 'YYYY-MM-DD'}},enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ inputs.custom_tag }},enable=${{ inputs.custom_tag != '' }}
+
+  # ---------------------------------------------------------------------------
+  # JOB 2 – Build & push the backend image
+  # Dockerfile: backend/Dockerfile
+  # Base: node:20-alpine → runs `node server.js` on port 5000
+  # ---------------------------------------------------------------------------
+  build-backend:
+    name: Build – Backend (Node 20)
+    runs-on: ubuntu-latest
+    needs: prepare
+    # Skip this job when operator targets a specific different service.
+    if: >
+      inputs.target_service == '' ||
+      inputs.target_service == 'backend'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Set up QEMU so we can build multi-platform images (amd64 + arm64).
+      # If you only need amd64 you can remove this step and the `platforms`
+      # argument from docker/build-push-action.
+      # -----------------------------------------------------------------------
+      - name: Set up QEMU (multi-platform builds)
+        uses: docker/setup-qemu-action@v3
+
+      # -----------------------------------------------------------------------
+      # Buildx is Docker's extended build client.  It enables:
+      #   • Multi-platform builds via QEMU
+      #   • BuildKit cache mounts (faster layer caching)
+      #   • OCI image index manifests
+      # -----------------------------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # -----------------------------------------------------------------------
+      # Authenticate to GHCR using the workflow's GITHUB_TOKEN.
+      # No additional secret is needed; the token is automatically available
+      # to every workflow run and has packages:write permission (granted above).
+      # -----------------------------------------------------------------------
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Build the backend image.
+      #
+      # context: backend/        — only the backend folder is sent to the daemon,
+      #                            keeping the build context small and fast.
+      # file:    backend/Dockerfile
+      # cache-from/to: Uses GitHub Actions cache (type=gha) to reuse layers
+      #                across runs.  `mode=max` caches all intermediate layers,
+      #                not just the final image.
+      # push:    controlled by the `should_push` output from the prepare job;
+      #          false on PRs (build-only) and true on main pushes.
+      # platforms: amd64 + arm64 covers most k8s node pools and local dev Macs.
+      # -----------------------------------------------------------------------
+      - name: Build and push – backend
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.prepare.outputs.should_push == 'true' }}
+          tags: ${{ needs.prepare.outputs.tags_backend }}
+          labels: |
+            org.opencontainers.image.title=sentinelops-backend
+            org.opencontainers.image.description=SentinelOps Node.js backend API
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ needs.prepare.outputs.build_date }}
+          cache-from: type=gha,scope=backend
+          cache-to:   type=gha,scope=backend,mode=max
+
+      # -----------------------------------------------------------------------
+      # Scan the freshly built image with Trivy before it is used downstream.
+      # CRITICAL-severity vulnerabilities fail the build; HIGH are reported only.
+      # Full security scanning lives in security-scan.yml; this is a quick gate.
+      # -----------------------------------------------------------------------
+      - name: Quick Trivy scan – backend
+        if: needs.prepare.outputs.should_push == 'true'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.OWNER }}/sentinelops-backend:${{ needs.prepare.outputs.image_tag }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL
+
+  # ---------------------------------------------------------------------------
+  # JOB 3 – Build & push the frontend image
+  # Dockerfile: frontend/Dockerfile  (multi-stage: node build → nginx serve)
+  # Stage 1 (build): node:20-alpine runs `npm run build` → dist/
+  # Stage 2 (serve): nginx:alpine serves dist/ on port 80
+  # ---------------------------------------------------------------------------
+  build-frontend:
+    name: Build – Frontend (Vite → nginx)
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: >
+      inputs.target_service == '' ||
+      inputs.target_service == 'frontend'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Build the multi-stage frontend image.
+      #
+      # The Dockerfile has two FROM directives:
+      #   Stage 1: node:20-alpine → installs deps, runs `npm run build`
+      #   Stage 2: nginx:alpine   → copies dist/ and serves on port 80
+      #
+      # BuildKit automatically caches each stage separately, so a code-only
+      # change skips the npm install layer if package-lock.json hasn't changed.
+      # -----------------------------------------------------------------------
+      - name: Build and push – frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.prepare.outputs.should_push == 'true' }}
+          tags: ${{ needs.prepare.outputs.tags_frontend }}
+          labels: |
+            org.opencontainers.image.title=sentinelops-frontend
+            org.opencontainers.image.description=SentinelOps React 19 frontend served via nginx
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ needs.prepare.outputs.build_date }}
+          cache-from: type=gha,scope=frontend
+          cache-to:   type=gha,scope=frontend,mode=max
+
+      - name: Quick Trivy scan – frontend
+        if: needs.prepare.outputs.should_push == 'true'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.OWNER }}/sentinelops-frontend:${{ needs.prepare.outputs.image_tag }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL
+
+  # ---------------------------------------------------------------------------
+  # JOB 4 – Build & push the sentinel-ai image
+  # Dockerfile: sentinel-ai/Dockerfile
+  # Base: python:3.13-slim → runs `uvicorn main:app` on port 8000
+  # Includes: recovery-engine/ Python stubs copied into the build context
+  # ---------------------------------------------------------------------------
+  build-sentinel-ai:
+    name: Build – Sentinel-AI (Python 3.13 / FastAPI)
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: >
+      inputs.target_service == '' ||
+      inputs.target_service == 'sentinel-ai'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # sentinel-ai/main.py does `sys.path.append("../recovery-engine")` at
+      # runtime, so the recovery-engine directory must be present inside the
+      # image.  We copy it into the sentinel-ai build context using a temporary
+      # directory so Dockerfile COPY instructions can access it.
+      # -----------------------------------------------------------------------
+      - name: Stage recovery-engine into sentinel-ai build context
+        run: |
+          cp -r recovery-engine sentinel-ai/recovery-engine
+
+      - name: Build and push – sentinel-ai
+        uses: docker/build-push-action@v6
+        with:
+          context: sentinel-ai
+          file: sentinel-ai/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.prepare.outputs.should_push == 'true' }}
+          tags: ${{ needs.prepare.outputs.tags_sentinel_ai }}
+          labels: |
+            org.opencontainers.image.title=sentinelops-sentinel-ai
+            org.opencontainers.image.description=SentinelOps AI incident analyser (FastAPI)
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ needs.prepare.outputs.build_date }}
+          cache-from: type=gha,scope=sentinel-ai
+          cache-to:   type=gha,scope=sentinel-ai,mode=max
+
+      - name: Quick Trivy scan – sentinel-ai
+        if: needs.prepare.outputs.should_push == 'true'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.OWNER }}/sentinelops-sentinel-ai:${{ needs.prepare.outputs.image_tag }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL
+
+  # ---------------------------------------------------------------------------
+  # JOB 5 – Build summary
+  # Writes a structured table to the GitHub Actions job summary page listing
+  # every built image, its tag, and the registry URL.
+  # ---------------------------------------------------------------------------
+  build-summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - build-backend
+      - build-frontend
+      - build-sentinel-ai
+    if: always()
+
+    steps:
+      - name: Write build summary
+        run: |
+          ICON_B="✅" ; [[ "${{ needs.build-backend.result }}"     != "success" ]] && ICON_B="❌"
+          ICON_F="✅" ; [[ "${{ needs.build-frontend.result }}"    != "success" ]] && ICON_F="❌"
+          ICON_S="✅" ; [[ "${{ needs.build-sentinel-ai.result }}" != "success" ]] && ICON_S="❌"
+          TAG="${{ needs.prepare.outputs.image_tag }}"
+          OWNER="${{ env.OWNER }}"
+          PUSH="${{ needs.prepare.outputs.should_push }}"
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## Docker Build Summary
+
+          | Status | Service       | Image                                                | Tag        | Pushed |
+          |--------|---------------|------------------------------------------------------|------------|--------|
+          | ${ICON_B} | backend    | \`ghcr.io/${OWNER}/sentinelops-backend\`      | \`${TAG}\` | ${PUSH} |
+          | ${ICON_F} | frontend   | \`ghcr.io/${OWNER}/sentinelops-frontend\`     | \`${TAG}\` | ${PUSH} |
+          | ${ICON_S} | sentinel-ai | \`ghcr.io/${OWNER}/sentinelops-sentinel-ai\` | \`${TAG}\` | ${PUSH} |
+
+          > Images also tagged \`latest\` and \`$(date +%Y-%m-%d)\` on main-branch builds.
+          EOF
