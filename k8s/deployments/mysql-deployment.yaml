@@ -1,0 +1,115 @@
+---
+# =============================================================================
+# SentinelOps AI – PostgreSQL StatefulSet
+# NOTE: The project uses PostgreSQL, not MySQL.
+#       This file is kept as postgres-deployment for clarity.
+#       For production, use a managed service (RDS, CloudSQL, etc.)
+# =============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sentinelops-postgres
+  namespace: sentinelops
+  labels:
+    app: sentinelops-postgres
+    component: database
+    part-of: sentinelops-ai
+spec:
+  serviceName: sentinelops-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sentinelops-postgres
+  template:
+    metadata:
+      labels:
+        app: sentinelops-postgres
+        component: database
+        part-of: sentinelops-ai
+    spec:
+      securityContext:
+        runAsUser: 999
+        fsGroup: 999
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_DB
+              value: sentinelops
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sentinelops-secrets
+                  key: postgres-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sentinelops-secrets
+                  key: postgres-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# ── Namespace ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sentinelops
+  labels:
+    name: sentinelops
+---
+# ── Secrets scaffold (values must be base64-encoded and injected by CI/CD) ────
+# kubectl create secret generic sentinelops-secrets \
+#   --from-literal=database-url="postgresql://user:pass@sentinelops-postgres:5432/sentinelops?schema=public" \
+#   --from-literal=jwt-secret="<64-char-random-string>" \
+#   --from-literal=jwt-refresh-secret="<64-char-random-string>" \
+#   --from-literal=postgres-user="sentinelops" \
+#   --from-literal=postgres-password="<strong-password>" \
+#   -n sentinelops
+---
+# ── ConfigMap ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinelops-config
+  namespace: sentinelops
+data:
+  cors-origin: "https://sentinelops.example.com"
+  ai-service-url: "http://sentinel-ai:8000"

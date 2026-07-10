@@ -1,0 +1,34 @@
+---
+# =============================================================================
+# SentinelOps AI – Prometheus Scrape Configuration
+# =============================================================================
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  scrape_timeout:      10s
+  external_labels:
+    cluster: sentinelops-local
+    env:     development
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - "/etc/prometheus/rules/*.yaml"
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: sentinelops-backend
+    static_configs:
+      - targets: ["backend:5000"]
+    metrics_path: /metrics
+
+  - job_name: sentinel-ai
+    static_configs:
+      - targets: ["sentinel-ai:8000"]
+    metrics_path: /metrics
