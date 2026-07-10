@@ -1,0 +1,103 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
+  ],
+  "annotations": { "list": [] },
+  "description": "SentinelOps AI – Platform Observability Dashboard",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Backend Status",
+      "gridPos": { "h": 4, "w": 3, "x": 0, "y": 0 },
+      "targets": [{ "expr": "up{job=\"sentinelops-backend\"}", "legendFormat": "Backend" }],
+      "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }] } }
+    },
+    {
+      "id": 2, "type": "stat", "title": "AI Service Status",
+      "gridPos": { "h": 4, "w": 3, "x": 3, "y": 0 },
+      "targets": [{ "expr": "up{job=\"sentinel-ai\"}", "legendFormat": "AI Service" }],
+      "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }] } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "HTTP Error Rate",
+      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 0 },
+      "targets": [{ "expr": "rate(http_requests_total{job=\"sentinelops-backend\",status=~\"5..\"}[5m]) / rate(http_requests_total{job=\"sentinelops-backend\"}[5m]) * 100", "legendFormat": "Error %" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 1, "color": "yellow" }, { "value": 5, "color": "red" }] } } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "P99 Latency",
+      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 0 },
+      "targets": [{ "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"sentinelops-backend\"}[5m]))", "legendFormat": "p99" }],
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 1, "color": "yellow" }, { "value": 2, "color": "red" }] } } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "HTTP Requests per Second",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "rate(http_requests_total{job=\"sentinelops-backend\"}[1m])", "legendFormat": "{{method}} {{route}} {{status}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Request Latency Percentiles",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"sentinelops-backend\"}[5m]))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"sentinelops-backend\"}[5m]))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"sentinelops-backend\"}[5m]))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Pod Restarts (all namespaces)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "rate(kube_pod_container_status_restarts_total[5m]) * 60", "legendFormat": "{{namespace}}/{{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Node CPU Usage %",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "(1 - avg by(node)(rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))) * 100", "legendFormat": "{{node}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100 } }
+    },
+    {
+      "id": 9, "type": "table", "title": "Active Alerts",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "targets": [
+        { "expr": "ALERTS{alertstate=\"firing\"}", "legendFormat": "", "instant": true }
+      ],
+      "transformations": [{ "id": "labelsToFields", "options": {} }]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["sentinelops", "kubernetes", "platform"],
+  "templating": {
+    "list": [
+      {
+        "name": "namespace", "type": "query", "label": "Namespace",
+        "datasource": { "type": "prometheus" },
+        "definition": "label_values(kube_pod_info, namespace)",
+        "refresh": 2
+      }
+    ]
+  },
+  "time": { "from": "now-3h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "SentinelOps AI – Platform",
+  "uid": "sentinelops-platform",
+  "version": 1
+}
