@@ -63,4 +63,3 @@ def stats():
 
     except Exception:
         return {"service": "SentinelOps AI", "total_incidents": 0}
-    
