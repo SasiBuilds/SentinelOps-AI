@@ -2,12 +2,13 @@ import sys
 import os
 import json
 
-sys.path.insert(0, os.path.abspath("../recovery-engine"))
-from recovery import recover
-
 from fastapi import FastAPI
 from analyzer import analyze
 from logger import save_incident
+
+sys.path.insert(0, os.path.abspath("../recovery-engine"))
+
+from recovery import recover
 
 app = FastAPI()
 
