@@ -9,8 +9,8 @@ from analyzer import analyze
 from logger import save_incident
 
 
+from recovery import recover  # noqa: E402
 
-from recovery import recover
 
 app = FastAPI()
 
@@ -66,3 +66,4 @@ def stats():
 
     except Exception:
         return {"service": "SentinelOps AI", "total_incidents": 0}
+    
