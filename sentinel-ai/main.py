@@ -11,10 +11,6 @@ from recovery import recover  # noqa: E402
 
 app = FastAPI()
 
-
-
-
-
 @app.get("/")
 def home():
     return {"service": "SentinelOps AI", "status": "running"}
@@ -67,4 +63,3 @@ def stats():
     except Exception:
         return {"service": "SentinelOps AI", "total_incidents": 0}
     
-
