@@ -9,7 +9,6 @@
 # A third job, `ci-status`, aggregates both results so downstream workflows
 # (cd.yml, docker-build.yml) can depend on a single gating job.
 # =============================================================================
-
 name: CI
 
 on:
