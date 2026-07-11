@@ -277,7 +277,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Quick Trivy scan – backend
         if: needs.prepare.outputs.should_push == 'true'
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.31.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.OWNER }}/sentinelops-backend:${{ needs.prepare.outputs.image_tag }}
           format: table
@@ -344,7 +344,7 @@ jobs:
 
       - name: Quick Trivy scan – frontend
         if: needs.prepare.outputs.should_push == 'true'
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.31.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.OWNER }}/sentinelops-frontend:${{ needs.prepare.outputs.image_tag }}
           format: table
@@ -411,7 +411,7 @@ jobs:
 
       - name: Quick Trivy scan – sentinel-ai
         if: needs.prepare.outputs.should_push == 'true'
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.31.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.OWNER }}/sentinelops-sentinel-ai:${{ needs.prepare.outputs.image_tag }}
           format: table
