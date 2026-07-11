@@ -2,17 +2,17 @@ import sys
 import os
 import json
 
-sys.path.insert(0, os.path.abspath("../recovery-engine"))
-
 from fastapi import FastAPI
 from analyzer import analyze
 from logger import save_incident
 
-
+sys.path.insert(0, os.path.abspath("../recovery-engine"))
 from recovery import recover  # noqa: E402
 
-
 app = FastAPI()
+
+
+
 
 
 @app.get("/")
@@ -67,3 +67,4 @@ def stats():
     except Exception:
         return {"service": "SentinelOps AI", "total_incidents": 0}
     
+
