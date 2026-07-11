@@ -11,6 +11,7 @@ from recovery import recover  # noqa: E402
 
 app = FastAPI()
 
+
 @app.get("/")
 def home():
     return {"service": "SentinelOps AI", "status": "running"}
