@@ -121,7 +121,7 @@ jobs:
       #                  table-output step below for a human-readable failure.
       # -----------------------------------------------------------------------
       - name: Trivy filesystem scan (SARIF)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: .
@@ -159,7 +159,7 @@ jobs:
       # (the SARIF run above used 0 so the upload step could always run).
       # -----------------------------------------------------------------------
       - name: Trivy filesystem scan (table – log output)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: .
@@ -256,7 +256,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Trivy image scan (SARIF) – ${{ matrix.service }}
         if: steps.image-check.outputs.exists == 'true'
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: image
           image-ref: ${{ steps.image-check.outputs.image_ref }}
@@ -285,7 +285,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Trivy image scan (table) – ${{ matrix.service }}
         if: steps.image-check.outputs.exists == 'true'
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: image
           image-ref: ${{ steps.image-check.outputs.image_ref }}
@@ -339,7 +339,7 @@ jobs:
       # scanners: config  – IaC misconfiguration checks only (no vuln/secret).
       # -----------------------------------------------------------------------
       - name: Trivy k8s config scan (SARIF)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: config
           scan-ref: k8s
@@ -364,7 +364,7 @@ jobs:
       # Change exit-code to "1" when all findings have been addressed.
       # -----------------------------------------------------------------------
       - name: Trivy k8s config scan (table)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: config
           scan-ref: k8s
