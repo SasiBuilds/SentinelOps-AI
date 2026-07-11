@@ -130,8 +130,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: "pip"
-          cache-dependency-path: sentinel-ai/requirements.txt
+          
 
       # -----------------------------------------------------------------------
       # Step 3 – Install production dependencies
@@ -181,7 +180,7 @@ jobs:
       # error (catches circular imports, missing __init__, typos, etc.).
       # The working-directory is sentinel-ai so relative imports resolve.
       # -----------------------------------------------------------------------
-      - name: Import smoke-test
+        name: Import smoke-test
         working-directory: ${{ github.workspace }}/sentinel-ai
         run: |
           PYTHONPATH=.:../recovery-engine \
@@ -214,8 +213,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: "pip"
-          cache-dependency-path: sentinel-ai/requirements.txt
+          
 
       - name: Install dev tooling
         run: pip install --no-cache-dir flake8 pytest
