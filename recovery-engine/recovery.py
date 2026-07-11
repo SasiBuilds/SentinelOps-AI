@@ -5,7 +5,6 @@ from kubernetes_recovery import (
 )
 
 
-
 def recover(action):
 
     if action == "restart deployment":
