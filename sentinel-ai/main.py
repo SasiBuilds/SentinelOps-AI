@@ -1,14 +1,12 @@
-from fastapi import FastAPI
-from analyzer import analyze
-from logger import save_incident
 import sys
 import os
 import json
 
-sys.path.append(
-    os.path.abspath("../recovery-engine")
-)
+from fastapi import FastAPI
+from analyzer import analyze
+from logger import save_incident
 
+sys.path.insert(0, os.path.abspath("../recovery-engine"))
 from recovery import recover
 
 app = FastAPI()
@@ -59,7 +57,7 @@ def incidents():
         with open("../docs/incidents.json", "r") as f:
             return json.load(f)
 
-    except:
+    except Exception:      
         return []
 
 
@@ -75,7 +73,7 @@ def stats():
             "total_incidents": len(incidents)
         }
 
-    except:
+    except Exception:     
         return {
             "service": "SentinelOps AI",
             "total_incidents": 0
