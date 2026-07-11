@@ -8,6 +8,7 @@ def analyze(alertname):
             "severity": "critical"
         },
 
+
         "HighCPUUsage": {
             "cause": "Resource exhaustion",
             "action": "scale deployment",
