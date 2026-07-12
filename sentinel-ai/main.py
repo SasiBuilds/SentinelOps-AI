@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from analyzer import analyze
 from logger import save_incident
 
-sys.path.insert(0, os.path.abspath("../recovery-engine"))
+sys.path.insert(0, "/recovery-engine")
 from recovery import recover  # noqa: E402
 
 app = FastAPI()
