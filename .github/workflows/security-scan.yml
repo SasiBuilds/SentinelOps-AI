@@ -1,0 +1,472 @@
+# =============================================================================
+# security-scan.yml – Security Scanning with Trivy
+#
+# Runs three complementary scan types against SentinelOps-AI:
+#
+#   1. fs-scan        – Filesystem / source-code scan
+#                       Detects vulnerable dependencies in package.json,
+#                       requirements.txt, and any embedded secrets or
+#                       misconfigurations in YAML/Dockerfile files.
+#
+#   2. image-scan     – Container image scan (all three service images)
+#                       Detects OS-level CVEs and library vulnerabilities
+#                       inside the actual image layers that will run in k8s.
+#
+#   3. config-scan    – Infrastructure-as-code (IaC) misconfiguration scan
+#                       Checks k8s manifests against security best practices
+#                       (missing resource limits, privileged containers, etc.)
+#
+# Results:
+#   • SARIF files are uploaded to GitHub Advanced Security (Code Scanning).
+#   • A plain-text table is printed in the Actions log for quick review.
+#   • CRITICAL vulnerabilities in images fail the workflow.
+#   • A consolidated summary is written to the GitHub job summary page.
+#
+# Triggers:
+#   • push to main
+#   • pull_request to main
+#   • Scheduled: every Monday at 06:00 UTC (catches newly published CVEs)
+#   • workflow_dispatch: manual on-demand scan
+#
+# Required permissions:
+#   security-events: write  – to upload SARIF to Code Scanning
+#   contents: read          – to checkout source and read images
+#   packages: read          – to pull images from GHCR
+# =============================================================================
+
+name: Security Scan
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Runs every Monday at 06:00 UTC.
+    # New CVEs are published daily; a weekly baseline keeps security debt visible
+    # without generating excessive noise.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: "Which scans to run"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - filesystem
+          - images
+          - config
+      fail_on_critical:
+        description: "Fail the workflow on CRITICAL findings"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF to GitHub Code Scanning
+  packages: read           # required to pull images from GHCR
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
+  # Image tag to scan: use the commit SHA on push/PR, 'latest' on schedule.
+  IMAGE_TAG: ${{ github.event_name == 'schedule' && 'latest' || format('sha-{0}', github.sha) }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # JOB 1 – Filesystem & Dependency Scan
+  #
+  # Scans the repository source tree for:
+  #   • Known CVEs in npm packages (frontend/package.json, package-lock.json)
+  #   • Known CVEs in Python packages (sentinel-ai/requirements.txt)
+  #   • Hardcoded secrets and credentials
+  #   • Dockerfile best-practice violations
+  # ---------------------------------------------------------------------------
+  fs-scan:
+    name: Filesystem & Dependency Scan
+    runs-on: ubuntu-latest
+    if: >
+      inputs.scan_type == '' ||
+      inputs.scan_type == 'all' ||
+      inputs.scan_type == 'filesystem'
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1 – Checkout
+      # Full depth is not needed here; shallow clone is fine for scanning.
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2 – Trivy filesystem scan (SARIF output)
+      #
+      # scanners: vuln,secret,config
+      #   vuln    – dependency CVEs (npm, pip, etc.)
+      #   secret  – hardcoded tokens, passwords, API keys
+      #   config  – Dockerfile and YAML misconfigurations
+      #
+      # format: sarif  – machine-readable; uploaded to GitHub Code Scanning so
+      #                  findings appear in the Security tab as annotations.
+      # exit-code: 0   – don't fail here; the CRITICAL gate is in the
+      #                  table-output step below for a human-readable failure.
+      # -----------------------------------------------------------------------
+      - name: Trivy filesystem scan (SARIF)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,config
+          format: sarif
+          output: trivy-fs-results.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "0"
+          # Ignore unfixed vulnerabilities to reduce noise from OS packages
+          # that have no upstream patch yet.
+          ignore-unfixed: true
+          # Suppress trivy's own update-check output in CI logs.
+          quiet: false
+
+      # -----------------------------------------------------------------------
+      # Step 3 – Upload SARIF to GitHub Code Scanning
+      #
+      # After upload, findings appear under:
+      #   Repository → Security → Code scanning → Trivy
+      # Each finding is annotated on the file line where the issue was detected.
+      # category differentiates this upload from the image-scan SARIF uploads.
+      # -----------------------------------------------------------------------
+      - name: Upload filesystem SARIF to Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()   # upload even when trivy finds issues
+        with:
+          sarif_file: trivy-fs-results.sarif
+          category: trivy-filesystem
+
+      # -----------------------------------------------------------------------
+      # Step 4 – Table output for the Actions log (human-readable)
+      #
+      # A second trivy run in `table` format prints a clear summary to stdout.
+      # exit-code: 1 here so CRITICAL findings actually fail the job step
+      # (the SARIF run above used 0 so the upload step could always run).
+      # -----------------------------------------------------------------------
+      - name: Trivy filesystem scan (table – log output)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,config
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: ${{ (inputs.fail_on_critical == false) && '0' || '1' }}
+          ignore-unfixed: true
+
+      # -----------------------------------------------------------------------
+      # Step 5 – Upload raw SARIF as a workflow artefact
+      # Useful for offline review or importing into third-party SAST tools.
+      # -----------------------------------------------------------------------
+      - name: Upload SARIF artefact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-fs-sarif
+          path: trivy-fs-results.sarif
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # JOB 2 – Container Image Scan
+  #
+  # Pulls each GHCR image and scans the full layer stack for OS and library
+  # vulnerabilities.  Runs three parallel sub-steps (one per service image).
+  #
+  # Note: Images must already exist in GHCR (pushed by docker-build.yml).
+  #       On PRs from forks where images haven't been pushed, image existence
+  #       is checked first and the step is skipped gracefully if not found.
+  # ---------------------------------------------------------------------------
+  image-scan:
+    name: Image Scan – ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    if: >
+      inputs.scan_type == '' ||
+      inputs.scan_type == 'all' ||
+      inputs.scan_type == 'images'
+
+    strategy:
+      # Continue scanning other images even if one scan job fails.
+      fail-fast: false
+      matrix:
+        include:
+          - service: backend
+            image: sentinelops-backend
+          - service: frontend
+            image: sentinelops-frontend
+          - service: sentinel-ai
+            image: sentinelops-sentinel-ai
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2 – Authenticate to GHCR
+      # Required to pull private images.  GITHUB_TOKEN has packages:read scope.
+      # -----------------------------------------------------------------------
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # Step 3 – Check image exists
+      # docker manifest inspect is fast (no layer pull) and returns non-zero
+      # if the image or tag doesn't exist.  We skip the scan gracefully on
+      # fork PRs where images may not have been pushed to GHCR yet.
+      # -----------------------------------------------------------------------
+      - name: Check image exists in GHCR
+        id: image-check
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.image }}:${{ env.IMAGE_TAG }}"
+          echo "Checking: $IMAGE"
+          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "image_ref=$IMAGE" >> "$GITHUB_OUTPUT"
+            echo "Image found."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Image $IMAGE not found in GHCR. Skipping scan. Build it first with docker-build.yml."
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step 4 – Trivy image scan (SARIF output)
+      #
+      # vuln scanner only here (config/secret scanning belongs on the source
+      # tree, not the runtime image).
+      # trivyignore: a project-level .trivyignore file can suppress accepted
+      # risks (e.g. CVEs in base OS with no upstream fix and confirmed mitigated).
+      # -----------------------------------------------------------------------
+      - name: Trivy image scan (SARIF) – ${{ matrix.service }}
+        if: steps.image-check.outputs.exists == 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: ${{ steps.image-check.outputs.image_ref }}
+          scanners: vuln
+          format: sarif
+          output: trivy-image-${{ matrix.service }}.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "0"
+          ignore-unfixed: true
+
+      # -----------------------------------------------------------------------
+      # Step 5 – Upload per-image SARIF to Code Scanning
+      # category is unique per service so findings are grouped correctly in
+      # the GitHub Security tab.
+      # -----------------------------------------------------------------------
+      - name: Upload image SARIF – ${{ matrix.service }}
+        if: steps.image-check.outputs.exists == 'true' && always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image-${{ matrix.service }}.sarif
+          category: trivy-image-${{ matrix.service }}
+
+      # -----------------------------------------------------------------------
+      # Step 6 – Table output with CRITICAL exit gate
+      # This step produces the human-readable log summary and fails on CRITICAL.
+      # -----------------------------------------------------------------------
+      - name: Trivy image scan (table) – ${{ matrix.service }}
+        if: steps.image-check.outputs.exists == 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: ${{ steps.image-check.outputs.image_ref }}
+          scanners: vuln
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: ${{ (inputs.fail_on_critical == false) && '0' || '1' }}
+          ignore-unfixed: true
+
+      # -----------------------------------------------------------------------
+      # Step 7 – Upload SARIF artefact for offline use
+      # -----------------------------------------------------------------------
+      - name: Upload image SARIF artefact – ${{ matrix.service }}
+        if: steps.image-check.outputs.exists == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-sarif-${{ matrix.service }}
+          path: trivy-image-${{ matrix.service }}.sarif
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # JOB 3 – Kubernetes Manifest / IaC Misconfiguration Scan
+  #
+  # Checks k8s YAML files against Trivy's built-in k8s policy library which
+  # covers CIS Kubernetes Benchmark controls, NSA/CISA hardening guidelines,
+  # and common misconfigurations including:
+  #   • Containers running as root
+  #   • Missing resource requests / limits
+  #   • Privileged containers
+  #   • hostPath mounts
+  #   • Missing readOnlyRootFilesystem
+  #   • Missing network policies
+  #   • Secrets with plaintext values (e.g. postgres-secret.yaml uses stringData)
+  # ---------------------------------------------------------------------------
+  config-scan:
+    name: K8s IaC Misconfiguration Scan
+    runs-on: ubuntu-latest
+    if: >
+      inputs.scan_type == '' ||
+      inputs.scan_type == 'all' ||
+      inputs.scan_type == 'config'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2 – Trivy config scan (SARIF output)
+      #
+      # scan-ref: k8s/   – scans every YAML file under the k8s directory.
+      # scanners: config  – IaC misconfiguration checks only (no vuln/secret).
+      # -----------------------------------------------------------------------
+      - name: Trivy k8s config scan (SARIF)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: k8s
+          scanners: config
+          format: sarif
+          output: trivy-k8s-config.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "0"
+
+      - name: Upload k8s config SARIF to Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-k8s-config.sarif
+          category: trivy-k8s-config
+
+      # -----------------------------------------------------------------------
+      # Step 4 – Table output
+      # Config findings are WARNING-only (exit-code 0) because many base-image
+      # k8s manifests have expected non-critical deviations (e.g. no resource
+      # limits defined yet).  Review findings and harden incrementally.
+      # Change exit-code to "1" when all findings have been addressed.
+      # -----------------------------------------------------------------------
+      - name: Trivy k8s config scan (table)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: k8s
+          scanners: config
+          format: table
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "0"
+
+      # -----------------------------------------------------------------------
+      # Step 5 – Specific check: postgres-secret uses plaintext stringData
+      # Trivy may not catch this nuance, so we add a direct grep check that
+      # warns when secrets are stored as plain text rather than base64 `data`.
+      # -----------------------------------------------------------------------
+      - name: Check for plaintext secrets in k8s manifests
+        run: |
+          echo "Checking k8s secrets for plaintext stringData usage..."
+          PLAINTEXT_SECRETS=$(grep -rl "stringData:" k8s/ || true)
+
+          if [[ -n "$PLAINTEXT_SECRETS" ]]; then
+            echo "::warning::The following secret manifests use stringData (plaintext values)."
+            echo "::warning::Consider using base64-encoded 'data' fields or an external secrets manager."
+            echo "$PLAINTEXT_SECRETS"
+          else
+            echo "No plaintext stringData found."
+          fi
+
+      - name: Upload k8s config SARIF artefact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-k8s-config-sarif
+          path: trivy-k8s-config.sarif
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # JOB 4 – Consolidated Security Summary
+  # Aggregates all scan results into the GitHub Actions job summary page and
+  # sets the final workflow status.
+  # ---------------------------------------------------------------------------
+  security-summary:
+    name: Security Scan Summary
+    runs-on: ubuntu-latest
+    needs:
+      - fs-scan
+      - image-scan
+      - config-scan
+    if: always()
+
+    steps:
+      - name: Write security summary
+        run: |
+          FS_STATUS="${{ needs.fs-scan.result }}"
+          IMG_STATUS="${{ needs.image-scan.result }}"
+          CFG_STATUS="${{ needs.config-scan.result }}"
+
+          icon() { [[ "$1" == "success" ]] && echo "✅" || ([[ "$1" == "skipped" ]] && echo "⏭️" || echo "❌"); }
+          FS_ICON=$(icon "$FS_STATUS")
+          IMG_ICON=$(icon "$IMG_STATUS")
+          CFG_ICON=$(icon "$CFG_STATUS")
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## Security Scan Summary
+
+          | Status | Scan Type              | Details                                          |
+          |--------|------------------------|--------------------------------------------------|
+          | ${FS_ICON}  | Filesystem & Deps   | CVEs in npm/pip deps + secrets + Dockerfile cfg |
+          | ${IMG_ICON} | Container Images    | backend · frontend · sentinel-ai image layers   |
+          | ${CFG_ICON} | K8s IaC Config      | CIS Benchmark · resource limits · secret checks |
+
+          ### How to View Results
+          - **GitHub Code Scanning:** Repository → Security → Code scanning
+          - **SARIF Artefacts:** Actions → This run → Artefacts (30-day retention)
+
+          ### Remediation Tips
+          - CRITICAL CVEs with a fix available must be resolved before merging.
+          - \`ignore-unfixed: true\` suppresses CVEs with no upstream patch.
+          - Add a \`.trivyignore\` file at the repo root to accept specific CVE IDs after review.
+          - Replace \`stringData\` in \`k8s/secrets/\` with an external secrets manager (e.g. Sealed Secrets, AWS Secrets Manager, Vault).
+
+          > Scan commit: \`${{ github.sha }}\` | Triggered by: **${{ github.actor }}** | $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+
+      # -----------------------------------------------------------------------
+      # Fail the workflow if any scan job failed.
+      # This step runs after the summary is written so the summary is always
+      # visible even when the workflow exits with a failure status.
+      # -----------------------------------------------------------------------
+      - name: Evaluate overall security gate
+        run: |
+          FAILED=0
+          for RESULT in \
+            "${{ needs.fs-scan.result }}" \
+            "${{ needs.image-scan.result }}" \
+            "${{ needs.config-scan.result }}"; do
+            if [[ "$RESULT" == "failure" ]]; then
+              FAILED=1
+            fi
+          done
+
+          if [[ "$FAILED" == "1" ]]; then
+            echo "::error::One or more security scans found CRITICAL vulnerabilities. See the Security tab for details."
+            exit 1
+          fi
+
+          echo "All security scans passed."

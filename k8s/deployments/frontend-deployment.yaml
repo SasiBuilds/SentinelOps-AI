@@ -85,3 +85,4 @@ spec:
           emptyDir: {}
         - name: nginx-tmp
           emptyDir: {}
+

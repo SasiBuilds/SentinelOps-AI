@@ -114,12 +114,3 @@ spec:
         - name: logs
           emptyDir: {}
 ---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: sentinelops-backend
-  namespace: sentinelops
-  labels:
-    app: sentinelops-backend
-    component: backend
-    part-of: sentinelops-ai

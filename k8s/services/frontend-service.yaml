@@ -92,3 +92,4 @@ spec:
   selector:
     matchLabels:
       app: sentinelops-frontend
+
