@@ -69,7 +69,7 @@ spec:
                   name: sentinelops-secrets
                   key: jwt-refresh-secret
             - name: AI_SERVICE_URL
-              value: "http://sentinel-ai:8000"
+              value: "http://sentinel-ai-service:8000"
             - name: CORS_ORIGIN
               valueFrom:
                 configMapKeyRef:

@@ -4,7 +4,7 @@
 # =============================================================================
 
 # ── Stage 1: dependency install ───────────────────────────────────────────────
-FROM node:20-alpine AS deps
+FROM node:20-bookworm AS deps
 
 WORKDIR /app
 
@@ -22,13 +22,13 @@ RUN npx prisma generate
 RUN npm prune --production
 
 # ── Stage 2: production image ─────────────────────────────────────────────────
-FROM node:20-alpine AS production
+FROM node:20-bookworm AS production
 ENV NODE_ENV=production
 
 WORKDIR /app
 
 # Create a non-root user
-RUN addgroup -S sentinelops && adduser -S sentinelops -G sentinelops
+RUN groupadd -r sentinelops && useradd -r -g sentinelops sentinelops
 
 # Copy installed modules + generated Prisma client from deps stage
 COPY --from=deps /app/node_modules ./node_modules
