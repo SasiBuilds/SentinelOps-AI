@@ -1,0 +1,42 @@
+# =============================================================================
+# SentinelOps AI – Backend .gitignore
+# =============================================================================
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Build output
+dist/
+build/
+
+# Prisma generated client (regenerate with `npm run db:generate`)
+# Keep schema.prisma, ignore generated client artifacts
+prisma/migrations/*.sql.bak
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Temp
+tmp/
+temp/
