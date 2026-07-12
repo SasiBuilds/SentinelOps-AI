@@ -15,6 +15,6 @@ spec:
     spec:
       containers:
       - name: sentinel-ai
-        image: sentinelops/sentinel-ai:latest
+        image: vishnukantheti/sentinelops-sentinel-ai:latest
         ports:
         - containerPort: 8000
