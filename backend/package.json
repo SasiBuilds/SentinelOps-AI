@@ -8,17 +8,17 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "dev": "node --env-file=.env --watch server.js",
-    "start": "node --env-file=.env server.js",
-    "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev",
-    "db:migrate:prod": "prisma migrate deploy",
-    "db:reset": "prisma migrate reset --force",
-    "db:studio": "prisma studio",
-    "db:seed": "node --env-file=.env prisma/seed.js",
-    "lint": "eslint src/ server.js",
-    "format": "prettier --write \"src/**/*.js\" server.js"
-  },
+  "dev": "node --watch server.js",
+  "start": "node server.js",
+  "db:generate": "prisma generate",
+  "db:migrate": "prisma migrate dev",
+  "db:migrate:prod": "prisma migrate deploy",
+  "db:reset": "prisma migrate reset --force",
+  "db:studio": "prisma studio",
+  "db:seed": "node prisma/seed.js",
+  "lint": "eslint src/ server.js",
+  "format": "prettier --write \"src/**/*.js\" server.js"
+},
   "dependencies": {
     "@prisma/client": "5.14.0",
     "bcryptjs": "2.4.3",
