@@ -19,6 +19,8 @@ import { notFound } from './middleware/notFound.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { swaggerSpec } from './utils/swagger.js';
 import apiRoutes from './routes/index.js';
+import metricsMiddleware from './middleware/prometheus.js';
+import { register } from './config/metrics.js';
 
 /**
  * Build and return a configured Express application instance.
@@ -58,6 +60,7 @@ export function createApp() {
 
   // ── HTTP request logging (Morgan → Winston) ────────────────────────────────
   app.use(requestLogger);
+  app.use(metricsMiddleware);
 
   // ── Rate limiting ──────────────────────────────────────────────────────────
   app.use(rateLimiter());
@@ -80,6 +83,10 @@ export function createApp() {
     );
     logger.info(`Swagger UI available at http://localhost:${config.port}/api-docs`);
   }
+  app.get("/metrics", async (req, res) => {
+  res.set("Content-Type", register.contentType);
+  res.end(await register.metrics());
+});
 
   // ── API routes ─────────────────────────────────────────────────────────────
   app.use(`/api/${config.apiVersion}`, apiRoutes);
