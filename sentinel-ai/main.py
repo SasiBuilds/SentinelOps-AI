@@ -1,50 +1,39 @@
-from fastapi import FastAPI
-from analyzer import analyze
-from logger import save_incident
 import sys
 import os
 import json
 
-sys.path.append(
-    os.path.abspath("../recovery-engine")
-)
+from fastapi import FastAPI
+from analyzer import analyze
+from logger import save_incident
 
-from recovery import recover
+sys.path.insert(0, os.path.abspath("../recovery-engine"))
+from recovery import recover  # noqa: E402
 
 app = FastAPI()
 
 
 @app.get("/")
 def home():
-    return {
-        "service": "SentinelOps AI",
-        "status": "running"
-    }
+    return {"service": "SentinelOps AI", "status": "running"}
 
 
 @app.get("/health")
 def health():
-    return {
-        "status": "healthy"
-    }
+    return {"status": "healthy"}
 
 
 @app.post("/alert")
 def receive_alert(alert: dict):
 
-    result = analyze(
-        alert.get("alertname")
-    )
+    result = analyze(alert.get("alertname"))
 
-    recovery_result = recover(
-        result["action"]
-    )
+    recovery_result = recover(result["action"])
 
     incident = {
         "alert": alert.get("alertname"),
         "root_cause": result["cause"],
         "recovery_action": result["action"],
-        "recovery_status": recovery_result
+        "recovery_status": recovery_result,
     }
 
     save_incident(incident)
@@ -59,7 +48,7 @@ def incidents():
         with open("../docs/incidents.json", "r") as f:
             return json.load(f)
 
-    except:
+    except Exception:
         return []
 
 
@@ -70,13 +59,7 @@ def stats():
         with open("../docs/incidents.json", "r") as f:
             incidents = json.load(f)
 
-        return {
-            "service": "SentinelOps AI",
-            "total_incidents": len(incidents)
-        }
+        return {"service": "SentinelOps AI", "total_incidents": len(incidents)}
 
-    except:
-        return {
-            "service": "SentinelOps AI",
-            "total_incidents": 0
-        }
+    except Exception:
+        return {"service": "SentinelOps AI", "total_incidents": 0}

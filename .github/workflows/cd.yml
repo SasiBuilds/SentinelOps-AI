@@ -1,0 +1,435 @@
+# =============================================================================
+# cd.yml – Continuous Deployment
+#
+# Triggers:
+#   • Automatically when the CI workflow completes successfully on main.
+#   • Manually via workflow_dispatch so engineers can re-deploy any existing
+#     image tag at will (useful for hotfixes and rollbacks).
+#
+# Strategy (three sequential stages):
+#   1. pre-deploy  – validate the cluster is reachable and images exist in GHCR.
+#   2. deploy      – apply every k8s manifest and update image tags.
+#   3. post-deploy – smoke-test live endpoints and notify on success/failure.
+#
+# Required repository secrets:
+#   KUBECONFIG_B64       – base64-encoded kubeconfig for the target cluster.
+#   GHCR_TOKEN           – GitHub PAT or GITHUB_TOKEN with packages:read scope
+#                          (only needed when the registry is private).
+#
+# Optional repository variables (with defaults):
+#   IMAGE_TAG            – image tag to deploy (default: "latest").
+#   SENTINEL_AI_URL      – reachable URL for smoke-test (default: skipped).
+# =============================================================================
+
+name: CD
+
+on:
+  # -------------------------------------------------------------------------
+  # Automatic trigger: fires when the CI workflow finishes on the main branch.
+  # `workflow_run` is preferred over `workflow_call` here because cd.yml is an
+  # independent workflow rather than a reusable one – it needs its own run
+  # history and can be manually re-triggered independently of CI.
+  # -------------------------------------------------------------------------
+  workflow_run:
+    workflows:
+      - CI          # must match the `name:` field in ci.yml exactly
+    branches:
+      - main
+    types:
+      - completed   # fires for both success and failure; filtered below
+
+  # -------------------------------------------------------------------------
+  # Manual trigger: lets any authorised team member deploy on demand.
+  # Inputs are optional – sane defaults are provided.
+  # -------------------------------------------------------------------------
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to deploy (e.g. sha-abc1234 or latest)"
+        required: false
+        default: "latest"
+        type: string
+      environment:
+        description: "Target environment"
+        required: false
+        default: "production"
+        type: choice
+        options:
+          - production
+          - staging
+      dry_run:
+        description: "Dry-run: validate manifests without applying them"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  # --------------------------------------------------------------------------
+  # IMAGE_TAG is resolved once here so every subsequent step uses the same
+  # value regardless of whether the run was automatic or manual.
+  # For automatic runs the tag is always 'latest'; for manual runs the
+  # operator-supplied value is used.
+  # --------------------------------------------------------------------------
+  IMAGE_TAG: ${{ inputs.image_tag || 'latest' }}
+  REGISTRY: ghcr.io
+  REPO_OWNER: ${{ github.repository_owner }}
+  K8S_NAMESPACE: sentinelops
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # GATE: only proceed if CI passed (relevant for workflow_run trigger).
+  # workflow_dispatch bypasses this gate because there is no `workflow_run`
+  # conclusion to check.
+  # ---------------------------------------------------------------------------
+  check-ci:
+    name: Verify CI Passed
+    runs-on: ubuntu-latest
+    # Run for both triggers; the condition inside differentiates them.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: CI conclusion check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "Triggered by CI workflow_run."
+            echo "CI conclusion: ${{ github.event.workflow_run.conclusion }}"
+            if [[ "${{ github.event.workflow_run.conclusion }}" != "success" ]]; then
+              echo "::error::CI did not pass. Aborting deployment."
+              exit 1
+            fi
+          else
+            echo "Triggered manually via workflow_dispatch. Skipping CI gate."
+          fi
+          echo "Proceeding with deployment of tag: ${{ env.IMAGE_TAG }}"
+
+  # ---------------------------------------------------------------------------
+  # STAGE 1 – Pre-deploy validation
+  # Checks that the cluster is reachable and every image is available in GHCR.
+  # ---------------------------------------------------------------------------
+  pre-deploy:
+    name: Pre-Deploy Validation
+    runs-on: ubuntu-latest
+    needs: check-ci
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1 – Checkout
+      # We need the k8s manifests to run kubectl dry-run validation.
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2 – Install kubectl
+      # Pins a specific kubectl minor version to avoid surprise behaviour from
+      # automatic upgrades.  Version must be within +/-1 minor of the cluster.
+      # -----------------------------------------------------------------------
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      # -----------------------------------------------------------------------
+      # Step 3 – Configure cluster access
+      # KUBECONFIG_B64 is a base64-encoded kubeconfig stored as a repo secret.
+      # Writing it to a temp file (rather than exporting it raw) avoids
+      # accidental echoing in debug output.
+      # -----------------------------------------------------------------------
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 --decode > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      # -----------------------------------------------------------------------
+      # Step 4 – Verify cluster connectivity
+      # `kubectl cluster-info` returns non-zero when the API server is
+      # unreachable, failing the job before any manifests are applied.
+      # -----------------------------------------------------------------------
+      - name: Verify cluster connectivity
+        run: kubectl cluster-info
+
+      # -----------------------------------------------------------------------
+      # Step 5 – Confirm namespace exists
+      # Creates the namespace if it does not already exist (idempotent).
+      # This mirrors the first manifest in k8s/namespace.yaml.
+      # -----------------------------------------------------------------------
+      - name: Ensure namespace exists
+        run: |
+          kubectl get namespace ${{ env.K8S_NAMESPACE }} \
+            || kubectl apply -f k8s/namespace.yaml
+
+      # -----------------------------------------------------------------------
+      # Step 6 – Dry-run manifest validation
+      # `kubectl apply --dry-run=server` sends manifests to the API server for
+      # schema and admission validation without persisting any changes.
+      # This catches YAML syntax errors, missing CRDs, and policy violations
+      # before the real apply in the deploy stage.
+      # -----------------------------------------------------------------------
+      - name: Validate manifests (server-side dry-run)
+        run: |
+          kubectl apply \
+            --dry-run=server \
+            --recursive \
+            -f k8s/namespace.yaml \
+            -f k8s/persistent-volumes/ \
+            -f k8s/secrets/ \
+            -f k8s/deployments/ \
+            -f k8s/services/
+
+      # -----------------------------------------------------------------------
+      # Step 7 – Verify images exist in GHCR
+      # Uses the GitHub Packages API to confirm each image:tag exists before
+      # we attempt a deployment that would otherwise enter ImagePullBackOff.
+      # -----------------------------------------------------------------------
+      - name: Verify images exist in GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGES=(
+            "ghcr.io/${{ env.REPO_OWNER }}/sentinelops-backend:${{ env.IMAGE_TAG }}"
+            "ghcr.io/${{ env.REPO_OWNER }}/sentinelops-frontend:${{ env.IMAGE_TAG }}"
+            "ghcr.io/${{ env.REPO_OWNER }}/sentinelops-sentinel-ai:${{ env.IMAGE_TAG }}"
+          )
+
+          # Log in to GHCR so `docker manifest inspect` can read private images.
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          for IMAGE in "${IMAGES[@]}"; do
+            echo "Checking: $IMAGE"
+            docker manifest inspect "$IMAGE" > /dev/null 2>&1 \
+              && echo "  ✓ found" \
+              || { echo "  ✗ NOT FOUND – aborting."; exit 1; }
+          done
+
+  # ---------------------------------------------------------------------------
+  # STAGE 2 – Deploy
+  # Applies all k8s manifests and patches image tags to the chosen version.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to Kubernetes (${{ inputs.environment || 'production' }})
+    runs-on: ubuntu-latest
+    needs: pre-deploy
+
+    # Protect the production environment with a manual approval gate if one
+    # is configured under Settings → Environments → production.
+    environment:
+      name: ${{ inputs.environment || 'production' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 --decode > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      # -----------------------------------------------------------------------
+      # Step 4 – Apply foundational resources
+      # Namespace, PVC, and secrets must exist before deployments reference them.
+      # `--server-side` uses server-side apply (SSA) which handles field
+      # ownership conflicts gracefully compared to client-side apply.
+      # -----------------------------------------------------------------------
+      - name: Apply namespace
+        run: kubectl apply --server-side -f k8s/namespace.yaml
+
+      - name: Apply persistent volumes
+        run: kubectl apply --server-side -f k8s/persistent-volumes/
+
+      - name: Apply secrets
+        run: kubectl apply --server-side -f k8s/secrets/
+
+      # -----------------------------------------------------------------------
+      # Step 7 – Apply services
+      # Services are applied before deployments so DNS entries are registered
+      # before pods try to discover each other.
+      # -----------------------------------------------------------------------
+      - name: Apply services
+        run: kubectl apply --server-side -f k8s/services/
+
+      # -----------------------------------------------------------------------
+      # Step 8 – Patch image tags
+      # Updates the container image in each deployment manifest to the chosen
+      # tag without modifying source-controlled YAML files.
+      # `kubectl set image` is idempotent; it is a no-op if the tag is already
+      # the desired value.
+      #
+      # Skip this step when dry_run is true.
+      # -----------------------------------------------------------------------
+      - name: Patch image tags
+        if: ${{ !inputs.dry_run }}
+        run: |
+          OWNER="${{ env.REPO_OWNER }}"
+          TAG="${{ env.IMAGE_TAG }}"
+          NS="${{ env.K8S_NAMESPACE }}"
+
+          kubectl set image deployment/backend \
+            backend=ghcr.io/${OWNER}/sentinelops-backend:${TAG} \
+            -n ${NS}
+
+          kubectl set image deployment/frontend \
+            frontend=ghcr.io/${OWNER}/sentinelops-frontend:${TAG} \
+            -n ${NS}
+
+          kubectl set image deployment/sentinel-ai \
+            sentinel-ai=ghcr.io/${OWNER}/sentinelops-sentinel-ai:${TAG} \
+            -n ${NS}
+
+      # -----------------------------------------------------------------------
+      # Step 9 – Apply deployments
+      # Applies the deployment manifests.  The image tag was already patched
+      # in the live cluster above; this step ensures replicas, resource limits,
+      # and any other spec changes are also synced.
+      # -----------------------------------------------------------------------
+      - name: Apply deployments
+        run: |
+          DRY="${{ inputs.dry_run == true && '--dry-run=server' || '' }}"
+          kubectl apply --server-side ${DRY} -f k8s/deployments/
+
+      # -----------------------------------------------------------------------
+      # Step 10 – Annotate deployments with deployment metadata
+      # Adds annotations that tools like Argo Rollouts, Datadog, and Grafana
+      # use to correlate deployment events with metrics and traces.
+      # -----------------------------------------------------------------------
+      - name: Annotate deployments with release metadata
+        if: ${{ !inputs.dry_run }}
+        run: |
+          NS="${{ env.K8S_NAMESPACE }}"
+          ANNOTATION="sentinelops.io/deployed-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ANNOTATION_SHA="sentinelops.io/commit-sha=${{ github.sha }}"
+          ANNOTATION_RUN="sentinelops.io/run-id=${{ github.run_id }}"
+
+          for DEPLOY in backend frontend sentinel-ai; do
+            kubectl annotate deployment/${DEPLOY} \
+              "${ANNOTATION}" "${ANNOTATION_SHA}" "${ANNOTATION_RUN}" \
+              --overwrite \
+              -n ${NS}
+          done
+
+      # -----------------------------------------------------------------------
+      # Step 11 – Wait for rollouts
+      # `kubectl rollout status` blocks until the desired number of pods are
+      # available or until the timeout expires (5 minutes per deployment).
+      # A non-zero exit code fails the job, triggering the notify-failure step.
+      # -----------------------------------------------------------------------
+      - name: Wait for rollouts
+        if: ${{ !inputs.dry_run }}
+        run: |
+          NS="${{ env.K8S_NAMESPACE }}"
+
+          for DEPLOY in postgres backend frontend sentinel-ai; do
+            echo "Waiting for rollout: deployment/${DEPLOY}"
+            kubectl rollout status deployment/${DEPLOY} \
+              -n ${NS} \
+              --timeout=5m
+            echo "  ✓ ${DEPLOY} rolled out successfully"
+          done
+
+      # -----------------------------------------------------------------------
+      # Step 12 – Print final pod status
+      # A quick sanity-check summary appended to the job log.
+      # -----------------------------------------------------------------------
+      - name: Show pod status
+        if: always() && !inputs.dry_run
+        run: |
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} \
+            -o wide \
+            --sort-by='.metadata.creationTimestamp'
+
+  # ---------------------------------------------------------------------------
+  # STAGE 3 – Post-deploy smoke test & notification
+  # ---------------------------------------------------------------------------
+  post-deploy:
+    name: Post-Deploy Smoke Test
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: always()   # run even when deploy fails so we always get a notification
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Smoke-test: hit the sentinel-ai /health endpoint if a URL is configured.
+      # The URL is stored in the SENTINEL_AI_URL repository variable so it can
+      # differ between staging and production without changing workflow code.
+      # -----------------------------------------------------------------------
+      - name: Smoke-test sentinel-ai /health
+        if: vars.SENTINEL_AI_URL != ''
+        run: |
+          URL="${{ vars.SENTINEL_AI_URL }}/health"
+          echo "GET $URL"
+
+          # Retry up to 5 times with a 15-second back-off; pods may be
+          # starting up immediately after rollout completion.
+          for i in {1..5}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
+            echo "Attempt $i – HTTP $STATUS"
+            if [[ "$STATUS" == "200" ]]; then
+              echo "Smoke-test passed."
+              exit 0
+            fi
+            sleep 15
+          done
+
+          echo "::error::Smoke-test failed after 5 attempts. Last HTTP status: $STATUS"
+          exit 1
+
+      # -----------------------------------------------------------------------
+      # Deployment summary written to the GitHub Actions job summary page.
+      # Visible at: Actions → this run → Post-Deploy Smoke Test → Summary.
+      # -----------------------------------------------------------------------
+      - name: Write deployment summary
+        if: always()
+        run: |
+          DEPLOY_STATUS="${{ needs.deploy.result }}"
+          ICON="✅"
+          [[ "$DEPLOY_STATUS" != "success" ]] && ICON="❌"
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ${ICON} Deployment Summary
+
+          | Field            | Value                                     |
+          |------------------|-------------------------------------------|
+          | **Status**       | ${DEPLOY_STATUS}                          |
+          | **Environment**  | ${{ inputs.environment || 'production' }} |
+          | **Image Tag**    | ${{ env.IMAGE_TAG }}                      |
+          | **Commit SHA**   | ${{ github.sha }}                         |
+          | **Run ID**       | ${{ github.run_id }}                      |
+          | **Triggered by** | ${{ github.actor }}                       |
+          | **Timestamp**    | $(date -u +%Y-%m-%dT%H:%M:%SZ)           |
+          EOF
+
+      # -----------------------------------------------------------------------
+      # Notify on failure.
+      # Add SLACK_WEBHOOK_URL as a repository secret to enable this step.
+      # The payload follows Slack's Block Kit format for readable alerts.
+      # -----------------------------------------------------------------------
+      - name: Notify on failure
+        if: needs.deploy.result == 'failure'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [[ -z "$SLACK_WEBHOOK_URL" ]]; then
+            echo "SLACK_WEBHOOK_URL not set – skipping Slack notification."
+            exit 0
+          fi
+
+          curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "🚨 *SentinelOps-AI deployment FAILED*",
+              "blocks": [{
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "🚨 *Deployment failed*\n*Env:* ${{ inputs.environment || 'production' }}\n*Tag:* ${{ env.IMAGE_TAG }}\n*SHA:* `${{ github.sha }}`\n*Run:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>"
+                }
+              }]
+            }'
