@@ -234,7 +234,7 @@ which variables are required before the server will start.
 | `JWT_EXPIRES_IN` | No | `15m` | Access token lifetime |
 | `JWT_REFRESH_EXPIRES_IN` | No | `7d` | Refresh token lifetime |
 | `CORS_ORIGIN` | No | `http://localhost:5173` | Comma-separated allowed origins |
-| `AI_SERVICE_URL` | No | `http://localhost:8000` | sentinel-ai FastAPI base URL |
+| `AI_SERVICE_URL` | No  | sentinel-ai FastAPI base URL |
 | `AI_SERVICE_TIMEOUT_MS` | No | `10000` | Request timeout to AI service (ms) |
 | `LOG_LEVEL` | No | `debug` | `error` \| `warn` \| `info` \| `debug` |
 | `SWAGGER_ENABLED` | No | `true` | Set `false` to disable Swagger UI |
