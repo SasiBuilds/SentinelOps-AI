@@ -99,7 +99,7 @@ const config = Object.freeze({
 
   // ── External services ─────────────────────────────────────────────────────
   aiService: {
-    url:     process.env.AI_SERVICE_URL     || 'http://localhost:8000',
+    url:     process.env.AI_SERVICE_URL     || null,
     timeout: parseInt(process.env.AI_SERVICE_TIMEOUT_MS, 10) || 10_000,
     apiKey:  process.env.AI_SERVICE_API_KEY || '',
   },
