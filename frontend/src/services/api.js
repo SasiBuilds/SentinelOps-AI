@@ -1,5 +1,4 @@
-const BASE_URL = "http://localhost:5000/api/v1";
-
+const BASE_URL = "https://sentinelops-ai-backend.onrender.com/api/v1";
 
 // Dashboard Stats
 export const getStats = async () => {
