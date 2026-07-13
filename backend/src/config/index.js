@@ -48,7 +48,7 @@ if (process.env.NODE_ENV !== ENVIRONMENTS.TEST) {
 // CORS origin – supports a comma-separated list of origins in the env var
 // ---------------------------------------------------------------------------
 function parseCorsOrigin(raw) {
-  if (!raw) return 'http://localhost:3000';
+  if (!raw) return 'http://localhost:5173';
   const origins = raw.split(',').map((o) => o.trim()).filter(Boolean);
   return origins.length === 1 ? origins[0] : origins;
 }

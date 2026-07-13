@@ -14,34 +14,28 @@ import SystemMetrics from "../components/SystemMetrics";
 import NotificationPanel from "../components/NotificationPanel";
 import LoadingSpinner from "../components/LoadingSpinner";
 import SkeletonCard from "../components/SkeletonCard";
-import { getDashboardStats } from "../services/api";
+import { getStats } from "../services/api";
 
 
 function Dashboard() { 
 
 const [loading, setLoading] = useState(true);
-
-useEffect(() => {
-  const timer = setTimeout(() => {
-    setLoading(false);
-  }, 2000);
-
-  return () => clearTimeout(timer);
-}, []);
-
+const [stats, setStats] = useState(null);
 useEffect(() => {
   const fetchData = async () => {
     try {
-      const data = await getDashboardStats();
+      const data = await getStats();
       console.log(data);
+      setStats(data.data);
     } catch (error) {
       console.error("Backend not available", error);
+    } finally {
+      setLoading(false);
     }
   };
 
   fetchData();
 }, []);
-
 if (loading) {
   return (
     <div className="min-h-screen bg-slate-950 p-8">
@@ -78,10 +72,29 @@ if (loading) {
           </p>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mt-8">
-            <StatusCard title="Total Services" value="12" color="text-blue-400" />
-            <StatusCard title="Healthy Services" value="10" color="text-green-400" />
-            <StatusCard title="Active Incidents" value="2" color="text-red-400" />
-            <StatusCard title="Recovery Rate" value="98%" color="text-yellow-400" />
+            <StatusCard
+  title="Total Incidents"
+  value={stats?.incidents?.total ?? 0}
+  color="text-blue-400"
+/>
+
+<StatusCard
+  title="Open Incidents"
+  value={stats?.incidents?.open ?? 0}
+  color="text-red-400"
+/>
+
+<StatusCard
+  title="Total Alerts"
+  value={stats?.alerts?.total ?? 0}
+  color="text-yellow-400"
+/>
+
+<StatusCard
+  title="Recovery Success Rate"
+  value={`${stats?.recovery?.successRatePct ?? 0}%`}
+  color="text-green-400"
+/>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-8">
