@@ -1,6 +1,27 @@
+import { useEffect, useState } from "react";
 import { FaExclamationCircle } from "react-icons/fa";
+import { getAlerts } from "../services/api";
 
 function AlertBanner() {
+  const [alert, setAlert] = useState(null);
+
+  useEffect(() => {
+    const fetchAlerts = async () => {
+      try {
+        const response = await getAlerts();
+        console.log(response);
+
+        if (response.data && response.data.length > 0) {
+          setAlert(response.data[0]);
+        }
+      } catch (error) {
+        console.error("Failed to fetch alerts:", error);
+      }
+    };
+
+    fetchAlerts();
+  }, []);
+
   return (
     <div className="bg-red-600 text-white rounded-xl p-4 flex justify-between items-center shadow-lg">
       <div className="flex items-center gap-3">
@@ -8,12 +29,12 @@ function AlertBanner() {
 
         <div>
           <h2 className="font-bold">
-            Critical Incident Detected
-          </h2>
+  {alert?.incident?.title || alert?.alertname || "No Active Alerts"}
+</h2>
 
           <p className="text-sm">
-            Authentication API is currently unavailable.
-          </p>
+  {alert?.annotations?.description || "System is operating normally."}
+</p>
         </div>
       </div>
 
