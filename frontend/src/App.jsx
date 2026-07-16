@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 
 import Dashboard from "./pages/Dashboard";
+import Login from "./pages/Login";
 import IncidentStatus from "./pages/IncidentStatus";
 import RecoveryStatus from "./pages/RecoveryStatus";
 import Analytics from "./pages/Analytics";
@@ -13,6 +14,7 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Dashboard />} />
+        <Route path="/login" element={<Login />} />
         <Route path="/incidents" element={<IncidentStatus />} />
         <Route path="/recovery" element={<RecoveryStatus />} />
         <Route path="/analytics" element={<Analytics />} />
