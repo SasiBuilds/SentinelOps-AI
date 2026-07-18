@@ -36,7 +36,8 @@ https://sentinelops-frontend-five.vercel.app/
 
 ## Architecture
 
-![alt text](architecture.drawio.png)
+![Uploading architecture of sentinelops ai(1).png…]()
+
 
 ---
 
