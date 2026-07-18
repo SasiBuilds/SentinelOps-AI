@@ -36,7 +36,8 @@ https://sentinelops-frontend-five.vercel.app/
 
 ## Architecture
 
-![Uploading architecture of sentinelops ai(1).png…]()
+![Uploading architecture of sentinelops ai.png…]()
+
 
 
 ---
